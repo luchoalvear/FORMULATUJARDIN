@@ -1,0 +1,24 @@
+# Datos y archivos generados en tiempo de ejecución — no van al repositorio
+epi_sistema.db
+uploads/
+
+# Insumos de trabajo (documentos reales de referencia, uno de ellos de 2.5GB) —
+# ya no se necesitan en tiempo de ejecución, sus datos relevantes están embebidos
+# en sistema_formulacion_epi.html
+Insumos/
+Metodologías/
+
+# Archivos de ejemplo/prueba sueltos, y exportaciones de proyectos reales de trabajo
+*.json.bak
+Reposici_n_jard_n_infantil_JI_El_Encuentro_San_Felipe.json
+
+# Configuración local de Claude Code, no necesaria para el despliegue
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
+Thumbs.db

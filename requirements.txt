@@ -1,0 +1,3 @@
+# Sin dependencias externas: backend_epi.py usa solo la librería estándar de Python.
+# Este archivo existe para que plataformas de despliegue (Railway, etc.) detecten
+# automáticamente que es un proyecto Python.

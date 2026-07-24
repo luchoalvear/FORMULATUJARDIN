@@ -42,6 +42,20 @@ guardados.
 2. Móntalo en la ruta `/data`.
 3. En "Variables" del servicio, agrega: `DATA_DIR` = `/data`.
 
+## 4.1 Agregar la clave de acceso (ADMIN_KEY) — para controlar quién puede crear cuentas
+
+El registro público está cerrado por defecto: nadie puede crear una cuenta sin
+conocer esta clave. Así controlas manualmente quién tiene acceso al sistema
+(por ejemplo, solo la compartes con clientes que ya pagaron).
+
+1. En "Variables" del servicio (mismo lugar que `DATA_DIR`), agrega:
+   `ADMIN_KEY` = una clave larga que solo tú conozcas (ej. una frase random).
+2. Para dar acceso a alguien: entra tú mismo al formulario "Crear cuenta" del
+   sistema y créala por esa persona, usando esa clave — o pásale la clave
+   directamente si prefieres que se registre ella misma.
+3. Si más adelante quieres cambiar quién puede registrarse, solo cambias el
+   valor de `ADMIN_KEY` en Railway (las cuentas ya creadas no se ven afectadas).
+
 ## 5. Listo
 
 Railway te asigna un dominio con HTTPS automático

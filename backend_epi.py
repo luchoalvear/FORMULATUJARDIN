@@ -34,6 +34,9 @@ import urllib.error
 from pathlib import Path
 
 PORT = int(os.environ.get('PORT', 8790))
+# Clave compartida requerida para crear cuentas nuevas (evita registro público abierto). Si no
+# está configurada, el registro queda cerrado por defecto (falla-cerrado, no abierto).
+ADMIN_KEY = os.environ.get('ADMIN_KEY', '')
 DATA_DIR = Path(os.environ.get('DATA_DIR', Path(__file__).parent))
 DB_PATH = DATA_DIR / 'epi_sistema.db'
 UPLOADS_DIR = DATA_DIR / 'uploads'
@@ -260,6 +263,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _registro(self):
         body = self._leer_json()
+        admin_key = body.get('admin_key') or ''
+        if not ADMIN_KEY or not secrets.compare_digest(admin_key, ADMIN_KEY):
+            return self._enviar_json(403, {'error': 'Clave de acceso al sistema incorrecta'})
+
         nombre = (body.get('nombre') or '').strip()
         username = (body.get('username') or '').strip().lower()
         password = body.get('password') or ''

@@ -207,6 +207,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         conn.close()
         return fila is not None
 
+    def _admin_autorizado(self, clave):
+        return bool(ADMIN_KEY) and secrets.compare_digest(clave or '', ADMIN_KEY)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
@@ -219,6 +222,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._registro()
         if self.path == '/api/login':
             return self._login()
+        if self.path == '/api/admin/usuarios':
+            return self._admin_crear_usuario()
         if self.path == '/api/proyectos':
             return self._crear_proyecto()
         m = re.match(r'^/api/proyectos/(\d+)/documentos$', self.path)
@@ -229,6 +234,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/api/me':
             return self._me()
+        if self.path.startswith('/api/admin/usuarios'):
+            return self._admin_listar_usuarios()
         if self.path == '/api/proyectos':
             return self._listar_proyectos()
         m = re.match(r'^/api/proyectos/(\d+)/documentos/(\d+)$', self.path)
@@ -245,16 +252,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._servir_estatico()
 
     def do_PUT(self):
+        m = re.match(r'^/api/admin/usuarios/(\d+)$', self.path)
+        if m:
+            return self._admin_editar_usuario(int(m.group(1)))
         m = re.match(r'^/api/proyectos/(\d+)$', self.path)
         if m:
             return self._actualizar_proyecto(int(m.group(1)))
         self._enviar_json(404, {'error': 'No encontrado'})
 
     def do_DELETE(self):
-        m = re.match(r'^/api/proyectos/(\d+)/documentos/(\d+)$', self.path)
+        ruta = self.path.split('?', 1)[0]
+        m = re.match(r'^/api/admin/usuarios/(\d+)$', ruta)
+        if m:
+            return self._admin_eliminar_usuario(int(m.group(1)))
+        m = re.match(r'^/api/proyectos/(\d+)/documentos/(\d+)$', ruta)
         if m:
             return self._eliminar_documento(int(m.group(1)), int(m.group(2)))
-        m = re.match(r'^/api/proyectos/(\d+)$', self.path)
+        m = re.match(r'^/api/proyectos/(\d+)$', ruta)
         if m:
             return self._eliminar_proyecto(int(m.group(1)))
         self._enviar_json(404, {'error': 'No encontrado'})
@@ -399,6 +413,93 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         conn = get_db()
         conn.execute('DELETE FROM proyectos WHERE id = ? AND usuario_id = ?', (proyecto_id, usuario['id']))
+        conn.commit()
+        conn.close()
+        self._enviar_json(200, {'ok': True})
+
+    def _admin_listar_usuarios(self):
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        admin_key = (qs.get('admin_key') or [''])[0]
+        if not self._admin_autorizado(admin_key):
+            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        conn = get_db()
+        filas = conn.execute('''
+            SELECT u.id, u.nombre, u.username, u.institucion, u.fecha_creacion,
+                   (SELECT COUNT(*) FROM proyectos p WHERE p.usuario_id = u.id) AS cantidad_proyectos
+            FROM usuarios u ORDER BY u.nombre
+        ''').fetchall()
+        conn.close()
+        self._enviar_json(200, {'usuarios': [dict(f) for f in filas]})
+
+    def _admin_crear_usuario(self):
+        body = self._leer_json()
+        if not self._admin_autorizado(body.get('admin_key')):
+            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        nombre = (body.get('nombre') or '').strip()
+        username = (body.get('username') or '').strip().lower()
+        password = body.get('password') or ''
+        if not nombre or not username or len(password) < 4:
+            return self._enviar_json(400, {'error': 'Nombre, usuario y una clave de al menos 4 caracteres son obligatorios'})
+        conn = get_db()
+        existe = conn.execute('SELECT id FROM usuarios WHERE username = ?', (username,)).fetchone()
+        if existe:
+            conn.close()
+            return self._enviar_json(400, {'error': 'Ese nombre de usuario ya existe'})
+        salt, hash_ = hash_password(password)
+        cur = conn.execute(
+            'INSERT INTO usuarios (nombre, username, password_salt, password_hash, institucion, fecha_creacion) VALUES (?, ?, ?, ?, ?, ?)',
+            (nombre, username, salt, hash_, body.get('institucion'), ahora_iso())
+        )
+        conn.commit()
+        conn.close()
+        self._enviar_json(201, {'id': cur.lastrowid})
+
+    def _admin_editar_usuario(self, usuario_id):
+        body = self._leer_json()
+        if not self._admin_autorizado(body.get('admin_key')):
+            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        conn = get_db()
+        existe = conn.execute('SELECT id FROM usuarios WHERE id = ?', (usuario_id,)).fetchone()
+        if not existe:
+            conn.close()
+            return self._enviar_json(404, {'error': 'Usuario no encontrado'})
+
+        nombre = (body.get('nombre') or '').strip()
+        institucion = body.get('institucion')
+        nueva_password = body.get('nueva_password') or ''
+        if not nombre:
+            conn.close()
+            return self._enviar_json(400, {'error': 'El nombre no puede quedar vacío'})
+        if nueva_password and len(nueva_password) < 4:
+            conn.close()
+            return self._enviar_json(400, {'error': 'La nueva clave debe tener al menos 4 caracteres'})
+
+        if nueva_password:
+            salt, hash_ = hash_password(nueva_password)
+            conn.execute(
+                'UPDATE usuarios SET nombre = ?, institucion = ?, password_salt = ?, password_hash = ? WHERE id = ?',
+                (nombre, institucion, salt, hash_, usuario_id)
+            )
+        else:
+            conn.execute('UPDATE usuarios SET nombre = ?, institucion = ? WHERE id = ?', (nombre, institucion, usuario_id))
+        conn.commit()
+        conn.close()
+        self._enviar_json(200, {'ok': True})
+
+    def _admin_eliminar_usuario(self, usuario_id):
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        admin_key = (qs.get('admin_key') or [''])[0]
+        if not self._admin_autorizado(admin_key):
+            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        conn = get_db()
+        tiene_proyectos = conn.execute('SELECT COUNT(*) c FROM proyectos WHERE usuario_id = ?', (usuario_id,)).fetchone()['c']
+        if tiene_proyectos:
+            conn.close()
+            return self._enviar_json(409, {'error': f'Este usuario tiene {tiene_proyectos} proyecto(s) y no se puede eliminar. Elimina o reasigna sus proyectos primero.'})
+        conn.execute('DELETE FROM sesiones WHERE usuario_id = ?', (usuario_id,))
+        conn.execute('DELETE FROM usuarios WHERE id = ?', (usuario_id,))
         conn.commit()
         conn.close()
         self._enviar_json(200, {'ok': True})

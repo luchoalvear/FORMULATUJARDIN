@@ -2687,7 +2687,7 @@ function renderListaProyectos(proyectos) {
     <div class="card-seccion mb-2 d-flex flex-row justify-content-between align-items-center flex-wrap gap-2">
       <div>
         <div class="fw-bold">${escaparHtml(p.nombre)}</div>
-        <div class="small text-muted">${p.bip ? 'BIP ' + p.bip + ' · ' : ''}Modificado ${formatearFechaCorta(p.fecha_modificacion)}</div>
+        <div class="small text-muted">${p.bip ? 'BIP ' + escaparHtml(p.bip) + ' · ' : ''}Modificado ${formatearFechaCorta(p.fecha_modificacion)}</div>
       </div>
       <div class="d-flex align-items-center gap-2">
         <div class="progress" style="width:100px;height:6px;">
@@ -4452,7 +4452,7 @@ function calcularPoblacionDetalladaPorNivelYSexo() {
 
   const proy = p.diagnostico.proyeccion_demanda;
   const pobRefTotal = (proy.resultado && proy.resultado.pob_referencia) || 0;
-  const pctHombres = (icov.poblacion_sexo.pct_hombres != null ? icov.poblacion_sexo.pct_hombres : 50) / 100;
+  const pctHombres = ((icov.poblacion_sexo && icov.poblacion_sexo.pct_hombres != null) ? icov.poblacion_sexo.pct_hombres : 50) / 100;
 
   const icalResultado = p.ical_detallado.resultado;
   const establecimientoTieneDeficit = !esConstruccionNueva() && icalResultado && icalResultado.ICal < 1;

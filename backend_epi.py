@@ -250,6 +250,18 @@ class BodyDemasiadoGrande(Exception):
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
+    def end_headers(self):
+        # Si respondemos sin haber leído el body de la solicitud (p. ej. 401 antes de leer un archivo),
+        # cerramos la conexión: si no, esos bytes se interpretarían como una nueva solicitud.
+        try:
+            pendiente = int(self.headers.get('Content-Length', 0) or 0) > 0 and not getattr(self, '_body_leido', False)
+        except (ValueError, AttributeError):
+            pendiente = False
+        if pendiente:
+            self.send_header('Connection', 'close')
+            self.close_connection = True
+        super().end_headers()
+
     def _cors(self):
         # El HTML lo sirve este mismo servidor (mismo origen), así que no hace falta CORS abierto.
         # Solo se responde a orígenes explícitamente autorizados vía CORS_ORIGINS.
@@ -295,6 +307,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.headers.get('X-Admin-Key') or ((body or {}).get('admin_key') if isinstance(body, dict) else '') or ''
 
     def _despachar(self, metodo):
+        self._body_leido = False
         try:
             metodo()
         except BodyDemasiadoGrande:
@@ -331,7 +344,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return b''
         if length > MAX_BODY_BYTES:
             raise BodyDemasiadoGrande()
-        return self.rfile.read(length)
+        datos = self.rfile.read(length)
+        self._body_leido = True
+        return datos
 
     def _leer_json(self):
         raw = self._leer_body_crudo()

@@ -45,7 +45,7 @@ Construye una aplicación web completa en **un único archivo HTML** (`sistema_f
 - **Chart.js** (CDN) para gráficos
 - **ExcelJS** (CDN, UMD) para exportar planillas `.xlsx` con fórmulas y formato
 - **docx.js** (CDN, build UMD de `dolanmiu/docx`) para generar documentos `.docx` reales (certificados, memorias, modelo de gestión)
-- **Claude API** (Anthropic) para el asistente redactor, vía un **proxy local** (`proxy_claude.py`) que evita el bloqueo CORS del navegador — el usuario ingresa su API key en Configuración
+- **Claude API** (Anthropic) para el asistente redactor, vía la ruta `/v1/messages` del propio `backend_epi.py` (evita el bloqueo CORS). Si el servidor tiene `ANTHROPIC_API_KEY`, la IA funciona para toda cuenta con sesión iniciada; si no, cada usuario ingresa su API key en Configuración. Modelo y tope de tokens los fija el servidor (`CLAUDE_MODEL`, `CLAUDE_MAX_TOKENS`).
 - **Backend local propio** (`backend_epi.py`, Python stdlib + SQLite) para autenticación real de usuarios, persistencia de proyectos por cuenta, y almacenamiento de documentos adjuntos — ver sección **AUTENTICACIÓN Y BACKEND**
 - **localStorage** solo como respaldo para el modo demo/invitado (sin cuenta) y para configuración local del navegador (API key)
 
@@ -138,7 +138,8 @@ let APP_STATE = {
 - **Backend:** `backend_epi.py`, servidor HTTP con librería estándar de Python (`http.server`, `sqlite3`, `hashlib`, `secrets`), sin dependencias externas. Corre en `http://localhost:8790`.
 - **Base de datos:** SQLite, archivo `epi_sistema.db` (se crea solo). Tablas: `usuarios`, `sesiones`, `proyectos`, `documentos`.
 - **Para correrlo:** `py backend_epi.py` en una terminal aparte. Sin el backend corriendo, el login con cuenta real falla con un toast explicativo; el modo demo/invitado sigue funcionando sin él.
-- **Proxy de Claude:** `proxy_claude.py`, servidor aparte en `http://localhost:8787`, reenvía `POST /v1/messages` a la API de Anthropic agregando el header CORS que el navegador necesita. El frontend llama a `http://localhost:8787/v1/messages`, nunca directo a `api.anthropic.com`.
+- **Proxy de Claude:** integrado en `backend_epi.py` (`POST /v1/messages`). El frontend llama siempre a `/v1/messages` mediante `llamarClaude()`, nunca directo a `api.anthropic.com`. El servidor fuerza el modelo y el máximo de tokens; con clave de servidor exige sesión iniciada.
+- **Datos de referencia:** las bases grandes (`BD_JARDINES`, `AREAS_INFLUENCIA`, `BD_JARDINES_COORDS`, `BD_OTROS_ESTABLECIMIENTOS`, `MANZANAS_POB_0_5`, `PROYECCION_POB_COMUNAL`, `LOGO_MINEDUC_BASE64`) viven en `data/*.js` y se cargan con `<script src>` antes del script principal. El servidor las entrega comprimidas (gzip) con ETag/caché.
 
 ### Modelo de datos (SQLite)
 
@@ -170,6 +171,19 @@ Claves con `hashlib.pbkdf2_hmac('sha256', password, salt, 100_000)`; tokens con 
 | DELETE | `/api/documentos/:id` | — | `{ ok }` |
 
 `avance_pct` se calcula al listar como `modulos_completados.length / 9 * 100`.
+
+### Endpoints adicionales (implementados)
+
+| Método | Ruta | Notas |
+|--------|------|-------|
+| GET | `/api/config` | Config pública: `{ ia_clave_servidor, ia_modelo, ia_max_tokens, registro_habilitado, largo_minimo_clave }` |
+| GET | `/api/salud` | Health check `{ ok: true }` |
+| POST | `/api/logout` | Invalida el token en el servidor |
+| GET/POST | `/api/admin/usuarios` | Requiere cabecera `X-Admin-Key` (nunca en la URL) |
+| PUT/DELETE | `/api/admin/usuarios/:id` | Ídem |
+
+Reglas: clave mínima 8 caracteres; 5 intentos fallidos de login bloquean 15 min (por IP+usuario); eliminar un proyecto borra también sus documentos y archivos; cambiar la clave de un usuario cierra sus sesiones; CORS cerrado salvo `CORS_ORIGINS`.
+
 
 ### Flujo de sesión en el frontend
 
@@ -498,6 +512,8 @@ Cada fila de Material Didáctico y Gastos Administrativos muestra el valor "Suge
 
 ### 7.5 Dotación Teórica según Decreto N°181 (2005, MINEDUC)
 
+> **Pendiente de validación normativa:** para jardines con Reconocimiento Oficial, el coeficiente técnico exigible está en el art. 10 del DS N°315/2010, modificado por el DS N°241/2017 (vigencia postergada por decretos posteriores, el último de marzo de 2026). La calculadora muestra este aviso; confirmar coeficientes antes de usarlos en un EPI.
+
 Coeficientes de dotación mínima por razón niño/adulto (Decreto 181, que modifica el Decreto 177/1996):
 
 | Cargo | Razón |
@@ -593,13 +609,14 @@ Todo prompt enviado a Claude concatena `INSTRUCCION_SIN_MARKDOWN` al final; toda
 
 **Llamada a Claude (siempre vía el proxy local, nunca directo a `api.anthropic.com`):**
 ```javascript
-const CLAUDE_API_URL = 'http://localhost:8787/v1/messages';
+const CLAUDE_API_URL = '/v1/messages'; // ruta del propio backend_epi.py
 async function generarTextoIA(seccion) {
   const prompt = SECCIONES_REDACCION[seccion].prompt_template(construirContextoProyecto()) + INSTRUCCION_SIN_MARKDOWN;
   const response = await fetch(CLAUDE_API_URL, {
     method: 'POST',
     headers: { 'x-api-key': APP_STATE.config.anthropic_api_key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'claude-opus-4-8', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] })
+    body: JSON.stringify({ model: CONFIG_SERVIDOR.ia_modelo, max_tokens: CONFIG_SERVIDOR.ia_max_tokens, messages: [{ role: 'user', content: prompt }] })
+    // (en el código real todo esto está centralizado en llamarClaude(prompt), que además avisa si stop_reason === 'max_tokens')
   });
   const result = await response.json();
   const texto = limpiarMarkdown(result.content[0].text);

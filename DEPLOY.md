@@ -1,78 +1,89 @@
 # Cómo publicar este sistema en la web
 
-El código ya está listo (servidor único, rutas relativas, `.gitignore`,
-`requirements.txt`, `Procfile`) y comiteado en este repositorio git local.
-Solo faltan estos pasos, que requieren tus propias cuentas.
-
-## 1. Crear el repositorio en GitHub
-
-1. Entra a https://github.com/new
-2. Ponle un nombre (el que quieras).
-3. Déjalo **vacío**: no marques "Add a README", "Add .gitignore" ni "license"
-   (ya los tienes en este repo y chocarían al subir).
-4. Clic en "Create repository".
-5. Copia la URL que te muestra (termina en `.git`).
-
-## 2. Conectar este repo local y subirlo
-
-Desde la carpeta del proyecto, en la terminal:
+El sistema es un solo servidor (`backend_epi.py`, solo librería estándar de Python)
+que sirve la página, los datos de referencia (`data/*.js`), la API (usuarios,
+proyectos, documentos) y el puente hacia la IA de Claude.
 
 ```
-git remote add origin https://github.com/TU_USUARIO/TU_REPO.git
-git branch -M main
-git push -u origin main
+sistema_formulacion_epi.html   página (≈0,5 MB)
+data/logo.js                   logo MINEDUC
+data/jardines.js               base JUNJI/VTF, áreas de influencia, coordenadas
+data/poblacion.js              población 0-5 por manzana (Censo 2024) y proyección INE
+backend_epi.py                 servidor
 ```
 
-La primera vez te va a pedir iniciar sesión en GitHub.
+Los archivos de `data/` se envían comprimidos (gzip) y quedan en caché del
+navegador: la primera visita descarga ≈1,3 MB en vez de 4,8 MB, y las
+siguientes casi nada.
 
-## 3. Crear cuenta y proyecto en Railway
+## 0. Antes de subir nada: secretos
 
-1. Entra a https://railway.app (puedes entrar directo con tu cuenta de GitHub).
-2. "New Project" → "Deploy from GitHub repo" → elige el repositorio que
-   acabas de subir.
-3. Railway detecta que es Python y lo despliega automáticamente.
+- **Nunca** dejes tokens o claves dentro de la carpeta del proyecto sin que
+  estén en `.gitignore`. `sistema-formulacion.txt`, `.env` y similares ya
+  están excluidos.
+- El repositorio tiene un *hook* local (`.git/hooks/pre-commit`) que bloquea
+  commits que contengan algo con forma de token de GitHub o clave de Anthropic.
+- Antes de `git push`, revisa con `git status` qué vas a subir.
 
-## 4. Agregar el Volume — MUY IMPORTANTE, no te lo saltes
+## 1. Probar en tu computador como si estuviera online
 
-Sin este paso, cada vez que Railway vuelva a desplegar (por ejemplo al subir
-un cambio de código) se pierden las cuentas de usuario y los proyectos
-guardados.
+Doble clic en **`simular_online.bat`**. Levanta el servidor con la misma
+configuración que tendría en Railway (variables de entorno, carpeta de datos
+separada en `datos_simulacion/`, clave de administración) y abre el navegador
+en http://localhost:8790. Para cerrarlo, cierra la ventana negra.
 
-1. Dentro del servicio, pestaña "Volumes" → "New Volume".
-2. Móntalo en la ruta `/data`.
-3. En "Variables" del servicio, agrega: `DATA_DIR` = `/data`.
+## 2. Subir los cambios a GitHub
 
-## 4.1 Agregar la clave de acceso (ADMIN_KEY) — para controlar quién puede crear cuentas
-
-El registro público está cerrado por defecto: nadie puede crear una cuenta sin
-conocer esta clave. Así controlas manualmente quién tiene acceso al sistema
-(por ejemplo, solo la compartes con clientes que ya pagaron).
-
-1. En "Variables" del servicio (mismo lugar que `DATA_DIR`), agrega:
-   `ADMIN_KEY` = una clave larga que solo tú conozcas (ej. una frase random).
-2. Para dar acceso a alguien: entra tú mismo al formulario "Crear cuenta" del
-   sistema y créala por esa persona, usando esa clave — o pásale la clave
-   directamente si prefieres que se registre ella misma.
-3. Si más adelante quieres cambiar quién puede registrarse, solo cambias el
-   valor de `ADMIN_KEY` en Railway (las cuentas ya creadas no se ven afectadas).
-
-## 5. Listo
-
-Railway te asigna un dominio con HTTPS automático
-(`tu-proyecto.up.railway.app`). Ábrelo — debería verse y funcionar igual que
-en tu computador, con la base de jardines JUNJI, la normativa, el catálogo de
-precios, y los datos de población/proyección del INE ya incluidos en el
-código (no dependen de nada externo).
-
-## Actualizaciones futuras
-
-Cuando quieras subir cambios de código más adelante:
+El repositorio ya está conectado a `github.com/luchoalvear/FORMULATUJARDIN`.
 
 ```
+git status          (revisa que no aparezcan archivos con claves)
 git add -A
 git commit -m "Descripción del cambio"
 git push
 ```
 
-Railway vuelve a desplegar solo al detectar el push. Los datos de usuarios
-y proyectos no se pierden porque quedan en el Volume, no en el código.
+## 3. Railway
+
+1. https://railway.app → "New Project" → "Deploy from GitHub repo" → elige el repositorio.
+2. Railway detecta Python y usa el `Procfile` (`web: python backend_epi.py`).
+
+### 3.1 Volume (obligatorio)
+
+Sin esto, cada redeploy borra usuarios y proyectos.
+
+1. En el servicio → "Volumes" → "New Volume" → montar en `/data`.
+2. En "Variables": `DATA_DIR` = `/data`.
+
+### 3.2 Variables de entorno
+
+| Variable | Obligatoria | Para qué |
+|---|---|---|
+| `DATA_DIR` | Sí | Carpeta del Volume (`/data`). |
+| `ADMIN_KEY` | Sí | Clave larga que solo tú conozcas. Permite crear/editar/eliminar usuarios desde el panel de administración. Sin ella, nadie puede registrarse. |
+| `ANTHROPIC_API_KEY` | Recomendada | Tu clave de Claude. Con ella, la redacción con IA funciona para todas las cuentas con sesión iniciada, sin que cada cliente ponga su clave; la clave nunca llega al navegador. Sin ella, cada usuario debe ingresar la suya en Configuración. |
+| `CLAUDE_MODEL` | No | Modelo de IA (por defecto `claude-opus-5-5`). Cámbialo aquí cuando salga uno nuevo, sin tocar el código. |
+| `CLAUDE_MAX_TOKENS` | No | Largo máximo de cada respuesta de IA (por defecto 4096 ≈ 3.000 palabras). |
+| `CORS_ORIGINS` | No | Solo si otra página web (otro dominio) necesita llamar a la API. Normalmente se deja vacía. |
+
+Railway define `PORT` solo.
+
+### 3.3 Health check (opcional)
+
+En "Settings" → "Healthcheck Path" puedes poner `/api/salud`.
+
+## 4. Seguridad incluida
+
+- Claves de usuario con PBKDF2 (100.000 iteraciones), mínimo 8 caracteres.
+- Bloqueo temporal tras 5 intentos fallidos de login (15 minutos, por IP y usuario).
+- La clave de administración viaja en una cabecera (`X-Admin-Key`), no en la URL, y los logs nunca registran parámetros de URL.
+- Cerrar sesión invalida el token en el servidor; cambiar la clave de un usuario cierra sus sesiones.
+- Sesiones vencidas se limpian automáticamente.
+- Límite de tamaño por solicitud (archivos de hasta 40 MB).
+- La API solo acepta llamadas de la misma página (sin CORS abierto).
+
+## 5. Dar acceso a un cliente
+
+Entra al panel de administración (en la pantalla de login) con tu `ADMIN_KEY`
+y crea la cuenta. Si cambias `ADMIN_KEY` en Railway, las cuentas ya creadas
+siguen funcionando.

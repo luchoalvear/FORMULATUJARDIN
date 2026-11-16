@@ -22,3 +22,14 @@ __pycache__/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Secretos y credenciales locales — NUNCA subir (tokens de GitHub, claves de API, .env)
+sistema-formulacion.txt
+.env
+.env.*
+*.secret
+*token*.txt
+datos_simulacion/
+
+# Clave local de Claude para simular_online.bat (nunca subir)
+clave_anthropic_local.txt

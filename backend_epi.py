@@ -10,11 +10,21 @@ Uso local:
     Abre http://localhost:8790
 
 Variables de entorno (para despliegue):
-    PORT      Puerto a escuchar (Railway la define automáticamente).
-    DATA_DIR  Carpeta donde viven la base de datos y los documentos subidos.
-              Debe apuntar a un volumen persistente en producción (si no,
-              se pierden los datos en cada redeploy). Por defecto, la misma
-              carpeta del script (sirve para uso local).
+    PORT               Puerto a escuchar (Railway la define automáticamente).
+    DATA_DIR           Carpeta donde viven la base de datos y los documentos subidos.
+                       Debe apuntar a un volumen persistente en producción (si no,
+                       se pierden los datos en cada redeploy). Por defecto, la misma
+                       carpeta del script (sirve para uso local).
+    ADMIN_KEY          Clave de administración (crear/editar/eliminar usuarios).
+                       Sin ella, el registro y la administración quedan cerrados.
+    ANTHROPIC_API_KEY  (opcional) Clave de Claude del servidor. Si está definida,
+                       la IA funciona para todos los usuarios con sesión iniciada
+                       sin que cada uno ingrese su propia clave (y no se expone
+                       al navegador). Si no, cada usuario usa la suya.
+    CLAUDE_MODEL       (opcional) Modelo de Claude a usar. Por defecto: claude-opus-5-5.
+    CLAUDE_MAX_TOKENS  (opcional) Máximo de tokens por respuesta de IA. Por defecto: 4096.
+    CORS_ORIGINS       (opcional) Orígenes extra permitidos, separados por coma.
+                       No hace falta si el HTML lo sirve este mismo servidor.
 """
 import http.server
 import socketserver
@@ -31,6 +41,10 @@ import mimetypes
 import urllib.parse
 import urllib.request
 import urllib.error
+import gzip
+import shutil
+import threading
+import time
 from pathlib import Path
 
 PORT = int(os.environ.get('PORT', 8790))
@@ -40,11 +54,70 @@ ADMIN_KEY = os.environ.get('ADMIN_KEY', '')
 DATA_DIR = Path(os.environ.get('DATA_DIR', Path(__file__).parent))
 DB_PATH = DATA_DIR / 'epi_sistema.db'
 UPLOADS_DIR = DATA_DIR / 'uploads'
-STATIC_HTML = Path(__file__).parent / 'sistema_formulacion_epi.html'
+BASE_DIR = Path(__file__).parent
+STATIC_HTML = BASE_DIR / 'sistema_formulacion_epi.html'
+DATA_ESTATICA_DIR = BASE_DIR / 'data'  # bases embebidas (jardines, población, etc.) separadas del HTML
 ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+CLAUDE_MODEL = os.environ.get('CLAUDE_MODEL', 'claude-opus-5-5').strip()
+CLAUDE_MAX_TOKENS = int(os.environ.get('CLAUDE_MAX_TOKENS', 4096))
+CLAUDE_TIMEOUT_SEG = 180
+CORS_ORIGINS = {o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip()}
 TOKEN_DIAS_VALIDEZ = 30
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024  # 40MB por archivo (planos CAD pueden ser grandes)
+# El archivo viaja en base64 dentro de un JSON (~33% más grande), más un margen para el resto del body.
+MAX_BODY_BYTES = int(MAX_UPLOAD_BYTES * 1.4) + 1024 * 1024
 EXTENSIONES_PERMITIDAS = {'pdf', 'jpg', 'jpeg', 'png', 'docx', 'xlsx', 'dwg', 'dxf'}
+LARGO_MINIMO_CLAVE = 8
+
+# Límite de intentos de login fallidos (en memoria): N fallos en la ventana bloquean por el resto de ella.
+LOGIN_MAX_FALLOS = 5
+LOGIN_VENTANA_SEG = 15 * 60
+_fallos_login = {}  # clave (ip|usuario) -> [timestamps de fallos]
+_fallos_lock = threading.Lock()
+
+
+def _registrar_fallo_login(clave):
+    ahora = time.time()
+    with _fallos_lock:
+        lista = [t for t in _fallos_login.get(clave, []) if ahora - t < LOGIN_VENTANA_SEG]
+        lista.append(ahora)
+        _fallos_login[clave] = lista
+
+
+def _login_bloqueado(clave):
+    ahora = time.time()
+    with _fallos_lock:
+        lista = [t for t in _fallos_login.get(clave, []) if ahora - t < LOGIN_VENTANA_SEG]
+        _fallos_login[clave] = lista
+        if len(lista) >= LOGIN_MAX_FALLOS:
+            return int(LOGIN_VENTANA_SEG - (ahora - lista[0])) + 1
+        return 0
+
+
+def _limpiar_fallos_login(clave):
+    with _fallos_lock:
+        _fallos_login.pop(clave, None)
+
+
+# Caché de archivos estáticos: ruta -> (mtime, bytes, bytes_gzip, etag)
+_cache_estaticos = {}
+_cache_lock = threading.Lock()
+
+
+def leer_estatico(ruta):
+    mtime = ruta.stat().st_mtime
+    with _cache_lock:
+        cacheado = _cache_estaticos.get(ruta)
+        if cacheado and cacheado[0] == mtime:
+            return cacheado
+    contenido = ruta.read_bytes()
+    comprimido = gzip.compress(contenido, compresslevel=6)
+    etag = '"' + hashlib.sha1(contenido).hexdigest()[:20] + '"'
+    entrada = (mtime, contenido, comprimido, etag)
+    with _cache_lock:
+        _cache_estaticos[ruta] = entrada
+    return entrada
 
 
 def get_db():
@@ -101,7 +174,15 @@ def inicializar_db():
     ''')
     conn.commit()
     conn.close()
-    UPLOADS_DIR.mkdir(exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    limpiar_sesiones_expiradas()
+
+
+def limpiar_sesiones_expiradas():
+    conn = get_db()
+    conn.execute('DELETE FROM sesiones WHERE fecha_expiracion <= ?', (ahora_iso(),))
+    conn.commit()
+    conn.close()
 
 
 def hash_password(password, salt=None):
@@ -145,6 +226,16 @@ def usuario_desde_token(token):
     return dict(fila) if fila else None
 
 
+def validar_datos_usuario(nombre, username, password):
+    if not nombre or not username:
+        return 'Nombre y usuario son obligatorios'
+    if not re.fullmatch(r'[a-z0-9._-]{3,40}', username):
+        return 'El usuario debe tener entre 3 y 40 caracteres: letras sin tilde, números, punto, guion o guion bajo'
+    if len(password) < LARGO_MINIMO_CLAVE:
+        return f'La clave debe tener al menos {LARGO_MINIMO_CLAVE} caracteres'
+    return None
+
+
 def usuario_publico(u):
     return {
         'id': u['id'], 'nombre': u['nombre'], 'username': u['username'],
@@ -152,24 +243,77 @@ def usuario_publico(u):
     }
 
 
+class BodyDemasiadoGrande(Exception):
+    pass
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
     def _cors(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        # El HTML lo sirve este mismo servidor (mismo origen), así que no hace falta CORS abierto.
+        # Solo se responde a orígenes explícitamente autorizados vía CORS_ORIGINS.
+        origen = self.headers.get('Origin', '')
+        if origen and origen in CORS_ORIGINS:
+            self.send_header('Access-Control-Allow-Origin', origen)
+            self.send_header('Vary', 'Origin')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Key, x-api-key, anthropic-version')
+
+    def _cabeceras_seguridad(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'SAMEORIGIN')
+        self.send_header('Referrer-Policy', 'strict-origin-when-cross-origin')
+
+    def _acepta_gzip(self):
+        return 'gzip' in (self.headers.get('Accept-Encoding') or '').lower()
 
     def _enviar_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        comprimir = len(body) > 2048 and self._acepta_gzip()
+        if comprimir:
+            body = gzip.compress(body, compresslevel=5)
         self.send_response(status)
         self._cors()
+        self._cabeceras_seguridad()
         self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
+        if comprimir:
+            self.send_header('Content-Encoding', 'gzip')
+            self.send_header('Vary', 'Accept-Encoding')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def _ip_cliente(self):
+        # Detrás del proxy de Railway la IP real viene en X-Forwarded-For.
+        reenviada = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip()
+        return reenviada or self.client_address[0]
+
+    def _clave_admin_recibida(self, body=None):
+        # Preferir la cabecera (no queda en logs ni historial); el body se acepta por compatibilidad.
+        return self.headers.get('X-Admin-Key') or ((body or {}).get('admin_key') if isinstance(body, dict) else '') or ''
+
+    def _despachar(self, metodo):
+        try:
+            metodo()
+        except BodyDemasiadoGrande:
+            self.close_connection = True
+            self._enviar_json(413, {'error': f'La solicitud supera el máximo permitido ({MAX_UPLOAD_BYTES // (1024 * 1024)}MB por archivo)'})
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as e:  # nunca dejar al cliente sin respuesta
+            print('[servidor] ERROR no controlado:', repr(e))
+            try:
+                self._enviar_json(500, {'error': 'Error interno del servidor'})
+            except Exception:
+                self.close_connection = True
+
     def _enviar_binario(self, status, contenido, content_type, nombre_descarga):
         self.send_response(status)
         self._cors()
+        self._cabeceras_seguridad()
+        self.send_header('Cache-Control', 'private, no-store')
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(contenido)))
         ascii_fallback = re.sub(r'[^A-Za-z0-9._-]', '_', nombre_descarga) or 'archivo'
@@ -178,13 +322,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(contenido)
 
-    def _leer_json(self):
-        length = int(self.headers.get('Content-Length', 0))
-        if length == 0:
-            return {}
-        raw = self.rfile.read(length)
+    def _leer_body_crudo(self):
         try:
-            return json.loads(raw.decode('utf-8'))
+            length = int(self.headers.get('Content-Length', 0) or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return b''
+        if length > MAX_BODY_BYTES:
+            raise BodyDemasiadoGrande()
+        return self.rfile.read(length)
+
+    def _leer_json(self):
+        raw = self._leer_body_crudo()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode('utf-8'))
+            return data if isinstance(data, dict) else {}
         except Exception:
             return {}
 
@@ -207,15 +362,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
         conn.close()
         return fila is not None
 
+    def _clave_admin_query_o_header(self):
+        # Compatibilidad: versiones antiguas del frontend mandaban la clave en la URL (?admin_key=).
+        if self.headers.get('X-Admin-Key'):
+            return self.headers.get('X-Admin-Key')
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        return (qs.get('admin_key') or [''])[0]
+
     def _admin_autorizado(self, clave):
         return bool(ADMIN_KEY) and secrets.compare_digest(clave or '', ADMIN_KEY)
 
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
+    def do_GET(self):
+        self._despachar(self._rutear_get)
+
     def do_POST(self):
+        self._despachar(self._rutear_post)
+
+    def do_PUT(self):
+        self._despachar(self._rutear_put)
+
+    def do_DELETE(self):
+        self._despachar(self._rutear_delete)
+
+    def _rutear_post(self):
+        if self.path == '/api/logout':
+            return self._logout()
         if self.path == '/v1/messages':
             return self._proxy_claude()
         if self.path == '/api/registro':
@@ -231,7 +408,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._subir_documento(int(m.group(1)))
         self._enviar_json(404, {'error': 'No encontrado'})
 
-    def do_GET(self):
+    def _rutear_get(self):
+        ruta = self.path.split('?', 1)[0]
+        if ruta == '/api/salud':
+            return self._enviar_json(200, {'ok': True})
+        if ruta == '/api/config':
+            return self._config_publica()
         if self.path == '/api/me':
             return self._me()
         if self.path.startswith('/api/admin/usuarios'):
@@ -251,7 +433,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._enviar_json(404, {'error': 'No encontrado'})
         return self._servir_estatico()
 
-    def do_PUT(self):
+    def _rutear_put(self):
         m = re.match(r'^/api/admin/usuarios/(\d+)$', self.path)
         if m:
             return self._admin_editar_usuario(int(m.group(1)))
@@ -260,7 +442,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._actualizar_proyecto(int(m.group(1)))
         self._enviar_json(404, {'error': 'No encontrado'})
 
-    def do_DELETE(self):
+    def _rutear_delete(self):
         ruta = self.path.split('?', 1)[0]
         m = re.match(r'^/api/admin/usuarios/(\d+)$', ruta)
         if m:
@@ -277,15 +459,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _registro(self):
         body = self._leer_json()
-        admin_key = body.get('admin_key') or ''
-        if not ADMIN_KEY or not secrets.compare_digest(admin_key, ADMIN_KEY):
+        if not self._admin_autorizado(self._clave_admin_recibida(body)):
             return self._enviar_json(403, {'error': 'Clave de acceso al sistema incorrecta'})
 
         nombre = (body.get('nombre') or '').strip()
         username = (body.get('username') or '').strip().lower()
         password = body.get('password') or ''
-        if not nombre or not username or len(password) < 4:
-            return self._enviar_json(400, {'error': 'Nombre, usuario y una clave de al menos 4 caracteres son obligatorios'})
+        error = validar_datos_usuario(nombre, username, password)
+        if error:
+            return self._enviar_json(400, {'error': error})
 
         conn = get_db()
         existe = conn.execute('SELECT id FROM usuarios WHERE username = ?', (username,)).fetchone()
@@ -311,15 +493,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
         username = (body.get('username') or '').strip().lower()
         password = body.get('password') or ''
 
+        clave_intentos = f'{self._ip_cliente()}|{username}'
+        espera = _login_bloqueado(clave_intentos)
+        if espera:
+            minutos = max(1, round(espera / 60))
+            return self._enviar_json(429, {'error': f'Demasiados intentos fallidos. Espera unos {minutos} minuto(s) antes de volver a intentar.'})
+
         conn = get_db()
         fila = conn.execute('SELECT * FROM usuarios WHERE username = ?', (username,)).fetchone()
         conn.close()
 
         if not fila or not verificar_password(password, fila['password_salt'], fila['password_hash']):
+            _registrar_fallo_login(clave_intentos)
             return self._enviar_json(401, {'error': 'Usuario o clave incorrectos'})
 
+        _limpiar_fallos_login(clave_intentos)
+        limpiar_sesiones_expiradas()
         token = crear_sesion(fila['id'])
         self._enviar_json(200, {'token': token, 'usuario': usuario_publico(fila)})
+
+    def _logout(self):
+        token = self._token_actual()
+        if token:
+            conn = get_db()
+            conn.execute('DELETE FROM sesiones WHERE token = ?', (token,))
+            conn.commit()
+            conn.close()
+        self._enviar_json(200, {'ok': True})
+
+    def _config_publica(self):
+        # Lo que el frontend necesita saber del servidor (nunca expone claves).
+        self._enviar_json(200, {
+            'ia_clave_servidor': bool(ANTHROPIC_API_KEY),
+            'ia_modelo': CLAUDE_MODEL,
+            'ia_max_tokens': CLAUDE_MAX_TOKENS,
+            'registro_habilitado': bool(ADMIN_KEY),
+            'largo_minimo_clave': LARGO_MINIMO_CLAVE,
+        })
 
     def _me(self):
         usuario = self._requerir_usuario()
@@ -411,17 +621,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         usuario = self._requerir_usuario()
         if not usuario:
             return
+        if not self._proyecto_de_usuario(proyecto_id, usuario['id']):
+            return self._enviar_json(404, {'error': 'Proyecto no encontrado'})
         conn = get_db()
-        conn.execute('DELETE FROM proyectos WHERE id = ? AND usuario_id = ?', (proyecto_id, usuario['id']))
-        conn.commit()
-        conn.close()
+        try:
+            # Primero los documentos (la llave foránea impide borrar un proyecto que aún los tiene)
+            conn.execute('DELETE FROM documentos WHERE proyecto_id = ?', (proyecto_id,))
+            conn.execute('DELETE FROM proyectos WHERE id = ? AND usuario_id = ?', (proyecto_id, usuario['id']))
+            conn.commit()
+        finally:
+            conn.close()
+        # Y luego los archivos físicos subidos de ese proyecto
+        carpeta = UPLOADS_DIR / str(proyecto_id)
+        if carpeta.is_dir():
+            shutil.rmtree(carpeta, ignore_errors=True)
         self._enviar_json(200, {'ok': True})
 
     def _admin_listar_usuarios(self):
-        parsed = urllib.parse.urlparse(self.path)
-        qs = urllib.parse.parse_qs(parsed.query)
-        admin_key = (qs.get('admin_key') or [''])[0]
-        if not self._admin_autorizado(admin_key):
+        if not self._admin_autorizado(self._clave_admin_query_o_header()):
             return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
         conn = get_db()
         filas = conn.execute('''
@@ -434,13 +651,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _admin_crear_usuario(self):
         body = self._leer_json()
-        if not self._admin_autorizado(body.get('admin_key')):
+        if not self._admin_autorizado(self._clave_admin_recibida(body)):
             return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
         nombre = (body.get('nombre') or '').strip()
         username = (body.get('username') or '').strip().lower()
         password = body.get('password') or ''
-        if not nombre or not username or len(password) < 4:
-            return self._enviar_json(400, {'error': 'Nombre, usuario y una clave de al menos 4 caracteres son obligatorios'})
+        error = validar_datos_usuario(nombre, username, password)
+        if error:
+            return self._enviar_json(400, {'error': error})
         conn = get_db()
         existe = conn.execute('SELECT id FROM usuarios WHERE username = ?', (username,)).fetchone()
         if existe:
@@ -457,7 +675,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _admin_editar_usuario(self, usuario_id):
         body = self._leer_json()
-        if not self._admin_autorizado(body.get('admin_key')):
+        if not self._admin_autorizado(self._clave_admin_recibida(body)):
             return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
         conn = get_db()
         existe = conn.execute('SELECT id FROM usuarios WHERE id = ?', (usuario_id,)).fetchone()
@@ -471,9 +689,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not nombre:
             conn.close()
             return self._enviar_json(400, {'error': 'El nombre no puede quedar vacío'})
-        if nueva_password and len(nueva_password) < 4:
+        if nueva_password and len(nueva_password) < LARGO_MINIMO_CLAVE:
             conn.close()
-            return self._enviar_json(400, {'error': 'La nueva clave debe tener al menos 4 caracteres'})
+            return self._enviar_json(400, {'error': f'La nueva clave debe tener al menos {LARGO_MINIMO_CLAVE} caracteres'})
 
         if nueva_password:
             salt, hash_ = hash_password(nueva_password)
@@ -481,6 +699,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'UPDATE usuarios SET nombre = ?, institucion = ?, password_salt = ?, password_hash = ? WHERE id = ?',
                 (nombre, institucion, salt, hash_, usuario_id)
             )
+            # Cambiar la clave cierra las sesiones abiertas de ese usuario
+            conn.execute('DELETE FROM sesiones WHERE usuario_id = ?', (usuario_id,))
         else:
             conn.execute('UPDATE usuarios SET nombre = ?, institucion = ? WHERE id = ?', (nombre, institucion, usuario_id))
         conn.commit()
@@ -488,10 +708,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._enviar_json(200, {'ok': True})
 
     def _admin_eliminar_usuario(self, usuario_id):
-        parsed = urllib.parse.urlparse(self.path)
-        qs = urllib.parse.parse_qs(parsed.query)
-        admin_key = (qs.get('admin_key') or [''])[0]
-        if not self._admin_autorizado(admin_key):
+        if not self._admin_autorizado(self._clave_admin_query_o_header()):
             return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
         conn = get_db()
         tiene_proyectos = conn.execute('SELECT COUNT(*) c FROM proyectos WHERE usuario_id = ?', (usuario_id,)).fetchone()['c']
@@ -610,50 +827,106 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._enviar_json(200, {'ok': True})
 
     def _servir_estatico(self):
-        if self.path not in ('/', '/sistema_formulacion_epi.html'):
-            return self._enviar_json(404, {'error': 'No encontrado'})
-        if not STATIC_HTML.exists():
-            return self._enviar_json(500, {'error': 'No se encontró sistema_formulacion_epi.html junto al servidor'})
-        contenido = STATIC_HTML.read_bytes()
+        ruta_url = urllib.parse.unquote(self.path.split('?', 1)[0])
+        if ruta_url in ('/', '/sistema_formulacion_epi.html'):
+            archivo, tipo, cache = STATIC_HTML, 'text/html; charset=utf-8', 'no-cache'
+        else:
+            m = re.fullmatch(r'/data/([A-Za-z0-9_-]+\.js)', ruta_url)
+            if not m:
+                return self._enviar_json(404, {'error': 'No encontrado'})
+            archivo, tipo = DATA_ESTATICA_DIR / m.group(1), 'application/javascript; charset=utf-8'
+            # Los datos cambian solo al desplegar: el navegador revalida con ETag (respuesta 304, sin re-descargar)
+            cache = 'public, max-age=3600, must-revalidate'
+        if not archivo.is_file():
+            return self._enviar_json(404, {'error': f'No se encontró {archivo.name} junto al servidor'})
+
+        _, contenido, comprimido, etag = leer_estatico(archivo)
+        if self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Cache-Control', cache)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        usar_gzip = self._acepta_gzip()
+        cuerpo = comprimido if usar_gzip else contenido
         self.send_response(200)
-        self._cors()
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(contenido)))
+        self._cabeceras_seguridad()
+        self.send_header('Content-Type', tipo)
+        self.send_header('Cache-Control', cache)
+        self.send_header('ETag', etag)
+        self.send_header('Vary', 'Accept-Encoding')
+        if usar_gzip:
+            self.send_header('Content-Encoding', 'gzip')
+        self.send_header('Content-Length', str(len(cuerpo)))
         self.end_headers()
-        self.wfile.write(contenido)
+        if self.command != 'HEAD':
+            self.wfile.write(cuerpo)
+
+    def do_HEAD(self):
+        self._despachar(self._servir_estatico)
 
     def _proxy_claude(self):
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length) if length else b''
+        raw = self._leer_body_crudo()
+        try:
+            payload = json.loads(raw.decode('utf-8')) if raw else {}
+        except Exception:
+            return self._enviar_json(400, {'error': {'message': 'Solicitud inválida'}})
+        if not isinstance(payload, dict):
+            return self._enviar_json(400, {'error': {'message': 'Solicitud inválida'}})
+
+        if ANTHROPIC_API_KEY:
+            # Con clave del servidor: solo usuarios con sesión pueden usar la IA (la clave la paga el dueño)
+            if not usuario_desde_token(self._token_actual()):
+                return self._enviar_json(401, {'error': {'message': 'Inicia sesión para usar la redacción asistida por IA'}})
+            api_key = ANTHROPIC_API_KEY
+        else:
+            api_key = (self.headers.get('x-api-key') or '').strip()
+            if not api_key:
+                return self._enviar_json(400, {'error': {'message': 'Falta la clave de API de Claude (configúrala en Configuración)'}})
+
+        # El servidor decide el modelo y el tope de tokens (evita abusos y deja el modelo configurable sin tocar el HTML)
+        payload['model'] = CLAUDE_MODEL
+        try:
+            pedido = int(payload.get('max_tokens') or CLAUDE_MAX_TOKENS)
+        except (TypeError, ValueError):
+            pedido = CLAUDE_MAX_TOKENS
+        payload['max_tokens'] = max(1, min(pedido, CLAUDE_MAX_TOKENS))
+
         req = urllib.request.Request(
             ANTHROPIC_URL,
-            data=body,
+            data=json.dumps(payload).encode('utf-8'),
             method='POST',
             headers={
-                'x-api-key': self.headers.get('x-api-key', ''),
+                'x-api-key': api_key,
                 'anthropic-version': self.headers.get('anthropic-version', '2023-06-01'),
                 'content-type': 'application/json',
             },
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=CLAUDE_TIMEOUT_SEG) as resp:
                 status = resp.status
                 data = resp.read()
         except urllib.error.HTTPError as e:
             status = e.code
             data = e.read()
         except Exception as e:
-            return self._enviar_json(502, {'error': str(e)})
+            print('[servidor] Error contactando a Claude:', repr(e))
+            return self._enviar_json(502, {'error': {'message': 'No se pudo contactar al servicio de IA. Intenta de nuevo en unos minutos.'}})
 
         self.send_response(status)
         self._cors()
+        self._cabeceras_seguridad()
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
     def log_message(self, format, *args):
-        print('[servidor]', self.address_string(), *args)
+        # Nunca registrar la query string (podría contener claves de versiones antiguas del frontend)
+        args = tuple(re.sub(r'\?\S*', '', a, count=1) if isinstance(a, str) and a.startswith(('GET ', 'POST ', 'PUT ', 'DELETE ', 'HEAD ')) else a for a in args)
+        print('[servidor]', self._ip_cliente(), format % args)
 
 
 class ServidorEPI(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -661,9 +934,13 @@ class ServidorEPI(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 if __name__ == '__main__':
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     inicializar_db()
     server = ServidorEPI(('0.0.0.0', PORT), Handler)
     print(f'Sistema de Formulación corriendo en el puerto {PORT}')
     print(f'Base de datos y documentos en: {DATA_DIR}')
+    print(f'IA: modelo {CLAUDE_MODEL}, máx. {CLAUDE_MAX_TOKENS} tokens, ' + ('clave del servidor' if ANTHROPIC_API_KEY else 'cada usuario usa su propia clave'))
+    if not ADMIN_KEY:
+        print('AVISO: ADMIN_KEY no está definida — el registro y la administración de usuarios quedan cerrados.')
     print('Deja esta ventana abierta mientras uses el sistema.')
     server.serve_forever()

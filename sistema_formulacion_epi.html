@@ -552,7 +552,7 @@ body {
           <div class="card-seccion" id="contenido-modulo-3"></div>
           <div class="barra-navegacion-modulo">
             <button class="btn btn-outline-secondary" onclick="irModuloAnterior()">Anterior</button>
-            <button class="btn btn-outline-primary" onclick="calcularICov()">Calcular ICov</button>
+            <button class="btn btn-outline-primary" onclick="recalcularICovSegunMetodo(); guardarEstado()">Guardar</button>
             <button class="btn btn-primary" onclick="irModuloSiguiente()">Siguiente</button>
           </div>
         </section>
@@ -4106,32 +4106,45 @@ function renderModuloICov() {
   }
 
   const metodo = icov.metodo || 'manual';
+  const fuentePob = proy.params.fuente_poblacion;
+  const hayPoligono = !!(p.establecimiento.area_influencia_poligono && p.establecimiento.area_influencia_poligono.length);
 
   const cont = document.getElementById('contenido-modulo-3');
   cont.innerHTML = `
+    <div class="alert alert-light border mb-4">
+      <div class="fw-semibold mb-1"><i class="bi bi-info-circle"></i> ¿Qué se hace en este módulo?</div>
+      <div class="small mb-2">Se mide si los cupos que existen hoy alcanzan para los niños y niñas que necesitan el servicio
+        (<b>ICov</b>, índice de cobertura) y cuánto crecerá esa demanda en 10 años. Completa los pasos en orden; los resultados se calculan solos.</div>
+      <div id="icov-pasos-estado" class="d-flex flex-wrap gap-2"></div>
+    </div>
+
+    ${encabezadoPasoICov(1, 'Cobertura actual', 'Ingresa los cupos, la matrícula y la lista de espera para calcular qué porcentaje de la demanda se cubre hoy.')}
     <div class="mb-3">
-      <label class="form-label d-block">Método de cálculo del ICov</label>
+      <label class="form-label d-block small fw-semibold">¿Cómo quieres calcularla?</label>
       <div class="btn-group" role="group">
         <input type="radio" class="btn-check" name="metodo-icov" id="metodo-manual" ${metodo === 'manual' ? 'checked' : ''}>
-        <label class="btn btn-outline-primary btn-sm" for="metodo-manual">Manual (un establecimiento)</label>
+        <label class="btn btn-outline-primary btn-sm" for="metodo-manual">Solo este jardín (Manual)</label>
         <input type="radio" class="btn-check" name="metodo-icov" id="metodo-red" ${metodo === 'red' ? 'checked' : ''}>
-        <label class="btn btn-outline-primary btn-sm" for="metodo-red">Red (Área de Influencia — Base JUNJI)</label>
+        <label class="btn btn-outline-primary btn-sm" for="metodo-red">Este jardín y sus vecinos (Red JUNJI)</label>
+      </div>
+      <div class="form-text">
+        <b>Red</b>: recomendado si el jardín está en la base JUNJI; carga solo su oferta y matrícula y las de los jardines cercanos (tú agregas la lista de espera).
+        <b>Manual</b>: si el jardín no está en la base, es nuevo, o prefieres escribir tus propios datos.
       </div>
     </div>
 
     <div id="seccion-icov-manual" class="${metodo === 'red' ? 'd-none' : ''}">
-      <h5 class="mb-3">Niveles educativos e indicadores de cobertura</h5>
-      <div class="table-responsive mb-3">
+      <div class="table-responsive mb-1">
         <table class="table table-sm align-middle">
           <thead>
-            <tr><th></th><th>Nivel</th><th>Edad</th><th>Oferta (O)</th><th>Matrícula (M)</th><th>Lista espera (LE)</th></tr>
+            <tr><th class="text-center">Incluir</th><th>Nivel</th><th>Edad</th><th>Cupos (capacidad)</th><th>Niños matriculados</th><th>Lista de espera</th></tr>
           </thead>
           <tbody>
             ${NIVELES_EDUCATIVOS.map(n => {
               const d = icov.niveles[n.codigo];
               return `
-              <tr>
-                <td><input type="checkbox" class="form-check-input" id="icov-activo-${n.codigo}" ${d.activo ? 'checked' : ''}></td>
+              <tr id="icov-fila-${n.codigo}" class="${d.activo ? '' : 'text-muted'}">
+                <td class="text-center"><input type="checkbox" class="form-check-input" id="icov-activo-${n.codigo}" ${d.activo ? 'checked' : ''} title="Incluir este nivel en el cálculo"></td>
                 <td>${n.nombre} <span class="text-muted small">(${n.codigo})</span></td>
                 <td class="text-muted small">${n.edad}</td>
                 <td><input type="number" min="0" class="form-control form-control-sm" id="icov-O-${n.codigo}" value="${d.O}" style="width:90px"></td>
@@ -4142,21 +4155,22 @@ function renderModuloICov() {
           </tbody>
         </table>
       </div>
+      <div class="form-text mb-3">Solo se cuentan los niveles con <b>Incluir</b> marcado (se marca solo al escribir un número). Deja sin marcar los niveles que el jardín no atiende.</div>
     </div>
 
     <div id="seccion-icov-red" class="${metodo === 'manual' ? 'd-none' : ''}">
-      <h5 class="mb-3">Red de Jardines — Área de Influencia (Base JUNJI)</h5>
-      <div class="small text-muted mb-2">Busca el jardín en estudio para cargar automáticamente su oferta y matrícula, y las de sus jardines vecinos según isócronas. Todos los valores son editables. Completa la Lista de Espera de cada jardín para calcular el ICov de la red.</div>
+      <div class="small text-muted mb-2">1) Busca el jardín en estudio. 2) Revisa la oferta y matrícula cargadas (son editables) y quita los vecinos que no correspondan. 3) Escribe la lista de espera de cada jardín.</div>
       <div id="buscador-jardin-icov" class="mb-3"></div>
-      <div id="tabla-red-icov"></div>
+      <div id="tabla-red-icov" class="mb-3"></div>
     </div>
 
-    <div class="card-seccion mb-3">
-      <h6 class="mb-2">Depuración de la Lista de Espera (obs. MDS c.II)</h6>
-      <div class="small text-muted mb-2">El MDS exige acreditar que la lista de espera corresponde a postulaciones vigentes, sin duplicidades ni atención posterior en otro establecimiento — no basta con el número bruto.</div>
+    <div id="resultado-icov" class="mb-4"></div>
+
+    ${encabezadoPasoICov(2, 'Validar la lista de espera', 'El MDS exige acreditar que la lista de espera está depurada — no basta con el número bruto (obs. MDS c.II). Marca lo que se verificó.')}
+    <div class="card-seccion mb-4">
       <div class="form-check">
         <input type="checkbox" class="form-check-input" id="le-dep-vigentes" ${icov.depuracion_lista_espera.vigentes ? 'checked' : ''}>
-        <label class="form-check-label" for="le-dep-vigentes">Se verificó que corresponde a postulaciones vigentes a la fecha de corte</label>
+        <label class="form-check-label" for="le-dep-vigentes">Corresponde a postulaciones vigentes a la fecha de corte</label>
       </div>
       <div class="form-check">
         <input type="checkbox" class="form-check-input" id="le-dep-duplicidad" ${icov.depuracion_lista_espera.sin_duplicidad ? 'checked' : ''}>
@@ -4164,7 +4178,7 @@ function renderModuloICov() {
       </div>
       <div class="form-check mb-2">
         <input type="checkbox" class="form-check-input" id="le-dep-atencion" ${icov.depuracion_lista_espera.sin_atencion_posterior ? 'checked' : ''}>
-        <label class="form-check-label" for="le-dep-atencion">Se descartaron postulantes ya atendidos posteriormente en otro establecimiento</label>
+        <label class="form-check-label" for="le-dep-atencion">Se descartaron postulantes que ya fueron atendidos en otro establecimiento</label>
       </div>
       <div class="row g-2">
         <div class="col-md-4">
@@ -4172,53 +4186,54 @@ function renderModuloICov() {
           <input type="date" class="form-control form-control-sm" id="le-dep-fecha" value="${icov.depuracion_lista_espera.fecha_corte || ''}">
         </div>
         <div class="col-md-8">
-          <label class="form-label small" for="le-dep-metodo">Método de depuración (breve)</label>
+          <label class="form-label small" for="le-dep-metodo">¿Cómo se depuró? (breve)</label>
           <input type="text" class="form-control form-control-sm" id="le-dep-metodo" value="${icov.depuracion_lista_espera.metodo || ''}" placeholder="Ej: cruce con plataforma de postulación única, revisión manual de RUT/nombre">
         </div>
       </div>
     </div>
 
-    <div id="resultado-icov"></div>
-
-    <hr class="my-4">
-    <h5 class="mb-3">Proyección de demanda a 10 años</h5>
-    <div class="row g-3 mb-2">
-      <div class="col-md-4">
-        <label class="form-label" for="proy-tasa">Tasa de crecimiento poblacional (%/año)</label>
-        <input type="number" step="0.1" class="form-control" id="proy-tasa" value="${proy.params.tasa_crecimiento}">
-        <button class="btn btn-outline-primary btn-sm mt-1" id="btn-tasa-ine" type="button">Calcular desde proyecciones INE (comuna)</button>
-        <div class="form-text" id="nota-fuente-tasa"></div>
+    ${encabezadoPasoICov(3, 'Proyección de demanda a 10 años', 'Tres datos: cuántos niños de 0 a 5 años viven en el área, cuánto crece la población y qué parte no usaría el servicio. Cada botón trae el dato desde una fuente oficial; también puedes escribirlo.')}
+    <div class="card-seccion mb-3">
+      <div class="mb-3">
+        <label class="form-label fw-semibold" for="proy-poblacion">3a. Niños y niñas de 0 a 5 años en el área de influencia</label>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <input type="number" min="0" class="form-control" id="proy-poblacion" value="${proy.params.poblacion_referencia}" style="max-width:160px">
+          <span class="small text-muted">Calcular desde el Censo 2024:</span>
+          <select class="form-select form-select-sm w-auto" id="proy-radio-censo" title="Radio alrededor del jardín">
+            <option value="500" ${(fuentePob && fuentePob.radio_m) === 500 ? 'selected' : ''}>radio 500 m</option>
+            <option value="1000" ${!(fuentePob && fuentePob.radio_m === 500) ? 'selected' : ''}>radio 1.000 m</option>
+          </select>
+          <button class="btn btn-outline-primary btn-sm" id="btn-consultar-censo-ine" type="button">Usar radio</button>
+          <button class="btn btn-outline-primary btn-sm" id="btn-consultar-censo-poligono" type="button" ${hayPoligono ? '' : 'disabled title="Dibuja el polígono del área de influencia en el Módulo 2 primero"'}>Usar polígono del Módulo 2</button>
+        </div>
+        <div class="form-text" id="nota-fuente-poblacion"></div>
       </div>
-      <div class="col-md-4">
-        <label class="form-label" for="proy-poblacion">Población referencia (0-5 años)</label>
-        <input type="number" min="0" class="form-control" id="proy-poblacion" value="${proy.params.poblacion_referencia}">
-      </div>
-      <div class="col-md-4">
-        <label class="form-label" for="proy-sin-interes">Población sin interés en servicio (%)</label>
-        <input type="number" step="0.1" class="form-control" id="proy-sin-interes" value="${proy.params.pct_sin_interes}">
-        <button class="btn btn-outline-primary btn-sm mt-1" id="btn-sin-interes-puc" type="button">Calcular desde estudio PUC (Fundación Integra)</button>
-        <div class="form-text" id="nota-fuente-sin-interes"></div>
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label fw-semibold" for="proy-tasa">3b. Crecimiento de la población (% por año)</label>
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <input type="number" step="0.1" class="form-control" id="proy-tasa" value="${proy.params.tasa_crecimiento}" style="max-width:120px">
+            <button class="btn btn-outline-primary btn-sm" id="btn-tasa-ine" type="button">Calcular desde INE (comuna)</button>
+          </div>
+          <div class="form-text" id="nota-fuente-tasa"></div>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label fw-semibold" for="proy-sin-interes">3c. Población que no usaría el servicio (%)</label>
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <input type="number" step="0.1" class="form-control" id="proy-sin-interes" value="${proy.params.pct_sin_interes}" style="max-width:120px">
+            <button class="btn btn-outline-primary btn-sm" id="btn-sin-interes-puc" type="button">Calcular desde estudio PUC-Integra</button>
+          </div>
+          <div class="form-text" id="nota-fuente-sin-interes"></div>
+        </div>
       </div>
     </div>
-    <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
-      <label class="form-label mb-0 small" for="proy-radio-censo">Radio del área de influencia:</label>
-      <select class="form-select form-select-sm w-auto" id="proy-radio-censo">
-        <option value="500" ${(proy.params.fuente_poblacion && proy.params.fuente_poblacion.radio_m) === 500 ? 'selected' : ''}>500 m</option>
-        <option value="1000" ${!(proy.params.fuente_poblacion && proy.params.fuente_poblacion.radio_m === 500) ? 'selected' : ''}>1.000 m</option>
-      </select>
-      <button class="btn btn-outline-primary btn-sm" id="btn-consultar-censo-ine" type="button">Calcular desde Censo 2024 (INE)</button>
-      <button class="btn btn-outline-warning btn-sm" id="btn-consultar-censo-poligono" type="button" ${(p.establecimiento.area_influencia_poligono && p.establecimiento.area_influencia_poligono.length) ? '' : 'disabled title="Dibuja el polígono del área de influencia en el Módulo 2 primero"'}>Calcular con polígono dibujado (Módulo 2)</button>
-    </div>
-    <div class="form-text mb-3" id="nota-fuente-poblacion"></div>
-    <button class="btn btn-outline-primary btn-sm mb-3" id="btn-calcular-proyeccion">Calcular proyección</button>
-    <div id="resultado-proyeccion"></div>
+    <div class="form-text mb-2">La proyección se actualiza sola al cambiar cualquiera de los tres datos.</div>
+    <div id="resultado-proyeccion" class="mb-4"></div>
 
-    <hr class="my-4">
-    <h5 class="mb-2">Población, Demanda y Oferta por Nivel y Sexo (obs. MDS c.I)</h5>
-    <div class="small text-muted mb-2">Desglosa, para cada nivel activo, la Población de Referencia, Sin Interés, Matriculada sin problema, Matriculada con problema, Objetivo y Postergada — separado por sexo. La distribución por sexo es un supuesto demográfico uniforme (editable); las demás categorías se derivan de la Población de Referencia (arriba), el criterio PUC/Integra de predisposición de envío, la matrícula y calidad (ICal) de este establecimiento (Módulo 4), y los cupos nuevos del Programa Arquitectónico (Módulo 5).</div>
+    ${encabezadoPasoICov(4, 'Desglose por nivel y sexo (revisión)', 'Tabla que exige el MDS (obs. MDS c.I). Se arma sola con los pasos anteriores; algunas filas se completan recién al terminar el Módulo 4 (calidad, ICal) y el Módulo 5 (cupos nuevos). Solo revisa el % de hombres si tienes un dato propio.')}
     <div class="row g-2 mb-2">
       <div class="col-md-3">
-        <label class="form-label small" for="pob-pct-hombres">Distribución por sexo — % Hombres</label>
+        <label class="form-label small" for="pob-pct-hombres">% de hombres en la población</label>
         <input type="number" min="0" max="100" step="0.1" class="form-control form-control-sm" id="pob-pct-hombres" value="${icov.poblacion_sexo.pct_hombres}">
       </div>
     </div>
@@ -4231,8 +4246,20 @@ function renderModuloICov() {
       if (!el) return;
       const evt = campo === 'activo' ? 'change' : 'input';
       el.addEventListener(evt, () => {
-        const valor = campo === 'activo' ? el.checked : (parseFloat(el.value) || 0);
-        actualizarNivelICov(n.codigo, campo, valor);
+        if (campo === 'activo') {
+          actualizarNivelICov(n.codigo, 'activo', el.checked);
+        } else {
+          const valor = parseFloat(el.value) || 0;
+          // Escribir un número en un nivel no incluido lo incluye automáticamente
+          const chk = document.getElementById(`icov-activo-${n.codigo}`);
+          if (valor > 0 && chk && !chk.checked) {
+            chk.checked = true;
+            icov.niveles[n.codigo].activo = true;
+          }
+          actualizarNivelICov(n.codigo, campo, valor);
+        }
+        const fila = document.getElementById(`icov-fila-${n.codigo}`);
+        if (fila) fila.classList.toggle('text-muted', !icov.niveles[n.codigo].activo);
       });
     });
   });
@@ -4249,36 +4276,33 @@ function renderModuloICov() {
     el.addEventListener(prop === 'checked' ? 'change' : 'input', () => {
       icov.depuracion_lista_espera[campo] = el[prop];
       guardarEstadoConDebounce();
+      renderEstadoPasosICov();
     });
   });
 
-  document.getElementById('btn-calcular-proyeccion').addEventListener('click', () => {
-    const pobAnterior = p.diagnostico.proyeccion_demanda.params.poblacion_referencia;
-    const tasaAnterior = p.diagnostico.proyeccion_demanda.params.tasa_crecimiento;
-    const sinInteresAnterior = p.diagnostico.proyeccion_demanda.params.pct_sin_interes;
+  // La proyección se recalcula sola al cambiar cualquiera de sus tres datos (igual que el ICov)
+  const recalcularProyeccionDesdeInputs = () => {
+    const params = p.diagnostico.proyeccion_demanda.params;
     const nuevaPob = parseFloat(document.getElementById('proy-poblacion').value) || 0;
     const nuevaTasa = parseFloat(document.getElementById('proy-tasa').value) || 0;
     const nuevoSinInteres = parseFloat(document.getElementById('proy-sin-interes').value) || 0;
+    const cambioPob = nuevaPob !== params.poblacion_referencia;
+    const cambioTasa = nuevaTasa !== params.tasa_crecimiento;
+    const cambioSinInteres = nuevoSinInteres !== params.pct_sin_interes;
     p.diagnostico.proyeccion_demanda.params = {
-      ...p.diagnostico.proyeccion_demanda.params,
+      ...params,
       tasa_crecimiento: nuevaTasa,
       poblacion_referencia: nuevaPob,
       pct_sin_interes: nuevoSinInteres
     };
-    if (nuevaPob !== pobAnterior) {
-      p.diagnostico.proyeccion_demanda.params.fuente_poblacion = null;
-      renderNotaFuentePoblacion();
-    }
-    if (nuevaTasa !== tasaAnterior) {
-      p.diagnostico.proyeccion_demanda.params.fuente_tasa = null;
-      renderNotaFuenteTasa();
-    }
-    if (nuevoSinInteres !== sinInteresAnterior) {
-      p.diagnostico.proyeccion_demanda.params.fuente_pct_sin_interes = null;
-      renderNotaFuenteSinInteres();
-    }
+    // Un valor escrito a mano deja de tener la fuente automática que tenía
+    if (cambioPob) { p.diagnostico.proyeccion_demanda.params.fuente_poblacion = null; renderNotaFuentePoblacion(); }
+    if (cambioTasa) { p.diagnostico.proyeccion_demanda.params.fuente_tasa = null; renderNotaFuenteTasa(); }
+    if (cambioSinInteres) { p.diagnostico.proyeccion_demanda.params.fuente_pct_sin_interes = null; renderNotaFuenteSinInteres(); }
     calcularProyeccionDemanda(p.diagnostico.proyeccion_demanda.params);
-    renderPoblacionDetalladaPorSexo();
+  };
+  ['proy-poblacion', 'proy-tasa', 'proy-sin-interes'].forEach(id => {
+    document.getElementById(id).addEventListener('change', recalcularProyeccionDesdeInputs);
   });
   document.getElementById('pob-pct-hombres').addEventListener('input', (e) => {
     icov.poblacion_sexo.pct_hombres = Math.min(100, Math.max(0, parseFloat(e.target.value) || 0));
@@ -4300,12 +4324,64 @@ function renderModuloICov() {
   renderBuscadorJardin('buscador-jardin-icov', (jardin) => buscarRedDesdeBD(jardin));
   renderTablaRed();
 
-  if (metodo === 'red' && icov.red && icov.red.jardines && icov.red.jardines.length) {
-    calcularICovRed();
+  recalcularICovSegunMetodo();
+  if (proy.resultado && proy.resultado.pob_referencia) {
+    renderGraficoProyeccion(proy.resultado);
   } else {
-    calcularICov();
+    document.getElementById('resultado-proyeccion').innerHTML = '<div class="alert alert-secondary mb-0">Completa al menos la cantidad de niños y niñas de 0 a 5 años (3a) para ver la proyección.</div>';
   }
-  if (proy.resultado) renderGraficoProyeccion(proy.resultado);
+  renderEstadoPasosICov();
+}
+
+function encabezadoPasoICov(numero, titulo, descripcion) {
+  return `
+    <div class="d-flex align-items-start gap-2 mb-2 mt-2">
+      <span class="badge rounded-pill bg-primary fs-6">${numero}</span>
+      <div>
+        <h5 class="mb-0">${titulo}</h5>
+        <div class="small text-muted">${descripcion}</div>
+      </div>
+    </div>`;
+}
+
+// Recalcula el ICov con el método elegido (Manual o Red), sin pisar uno con el otro.
+function recalcularICovSegunMetodo() {
+  const icov = APP_STATE.proyecto.diagnostico.icov;
+  if ((icov.metodo || 'manual') === 'red') {
+    if (icov.red && icov.red.jardines && icov.red.jardines.length) return calcularICovRed();
+    icov.resultado = { ICov: null, detalle: [], metodo: 'red' };
+    guardarEstadoConDebounce();
+    renderResultadoICov(icov.resultado);
+    calcularINS();
+    renderPoblacionDetalladaPorSexo();
+    renderEstadoPasosICov();
+    return icov.resultado;
+  }
+  return calcularICov();
+}
+
+// Estado (pendiente / listo) de cada paso, en el recuadro del inicio del módulo.
+function renderEstadoPasosICov() {
+  const cont = document.getElementById('icov-pasos-estado');
+  if (!cont) return;
+  const p = APP_STATE.proyecto;
+  const icov = p.diagnostico.icov;
+  const dep = icov.depuracion_lista_espera || {};
+  const proyRes = p.diagnostico.proyeccion_demanda.resultado;
+  const paso1 = !!(icov.resultado && icov.resultado.ICov != null);
+  const paso2 = !!(dep.vigentes && dep.sin_duplicidad && dep.sin_atencion_posterior && dep.fecha_corte);
+  const paso3 = !!(proyRes && proyRes.pob_referencia > 0);
+  const pasos = [
+    ['1. Cobertura actual', paso1 ? 'listo' : 'pendiente'],
+    ['2. Validar lista de espera', paso2 ? 'listo' : 'pendiente'],
+    ['3. Proyección de demanda', paso3 ? 'listo' : 'pendiente'],
+    ['4. Desglose por sexo', (paso1 && paso3) ? 'revisar' : 'después de 1 y 3']
+  ];
+  cont.innerHTML = pasos.map(([nombre, estado]) => {
+    const color = estado === 'listo' ? 'success' : (estado === 'revisar' ? 'info' : 'secondary');
+    const icono = estado === 'listo' ? 'check-circle-fill' : (estado === 'revisar' ? 'eye' : 'circle');
+    return `<span class="badge text-bg-${color} fw-normal"><i class="bi bi-${icono}"></i> ${nombre} · ${estado}</span>`;
+  }).join('');
 }
 
 function cambiarMetodoICov(metodo) {
@@ -4343,6 +4419,7 @@ function calcularICov() {
   renderResultadoICov(icov.resultado);
   calcularINS();
   renderPoblacionDetalladaPorSexo();
+  renderEstadoPasosICov();
   return icov.resultado;
 }
 
@@ -4351,28 +4428,52 @@ function renderResultadoICov(resultado) {
   if (!cont) return;
 
   if (!resultado || !resultado.detalle.length) {
-    cont.innerHTML = `<div class="alert alert-secondary mb-0">Activa al menos un nivel educativo para calcular el ICov.</div>`;
+    const msg = resultado && resultado.metodo === 'red'
+      ? 'Busca el jardín en estudio para cargar la red y calcular la cobertura.'
+      : 'Marca "Incluir" y escribe los datos de al menos un nivel para calcular la cobertura.';
+    cont.innerHTML = `<div class="alert alert-secondary mb-0">${msg}</div>`;
     return;
   }
 
+  const fmt = (n) => Math.round(n).toLocaleString('es-CL');
+  const totalCupos = resultado.detalle.reduce((a, d) => a + d.O, 0);
+  const totalDemanda = resultado.detalle.reduce((a, d) => a + d.D_j_min, 0);
+  const cuposFaltantes = resultado.detalle.reduce((a, d) => a + Math.max(0, d.D_j_min - d.O), 0);
+  const pct = (resultado.ICov * 100).toFixed(1);
+  const lectura = cuposFaltantes > 0
+    ? `Los cupos actuales cubren el <b>${pct}%</b> de la demanda: faltan <b>${fmt(cuposFaltantes)} cupo(s)</b> para atender a todos los niños y niñas matriculados o en lista de espera.`
+    : `Los cupos actuales alcanzan para toda la demanda (matrícula + lista de espera) en los niveles incluidos.`;
+
   cont.innerHTML = `
     <div class="table-responsive mb-2">
-      <table class="table table-sm table-bordered">
-        <thead><tr><th>Nivel</th><th>O_j</th><th>M_j</th><th>LE_j</th><th>D_j_min</th><th>w_j</th><th>ICov_j</th></tr></thead>
+      <table class="table table-sm table-bordered align-middle">
+        <thead><tr><th>Nivel</th><th>Cupos</th><th>Matriculados</th><th>Lista de espera</th><th>Demanda<br><span class="fw-normal small">(matrícula + lista)</span></th><th>Peso en el total</th><th>Cobertura</th></tr></thead>
         <tbody>
           ${resultado.detalle.map(d => `
             <tr>
               <td>${d.nombre}</td>
-              <td>${d.O}</td><td>${d.M}</td><td>${d.LE}</td>
-              <td>${d.D_j_min}</td>
+              <td>${fmt(d.O)}</td><td>${fmt(d.M)}</td><td>${fmt(d.LE)}</td>
+              <td>${fmt(d.D_j_min)}</td>
               <td>${(d.w_j * 100).toFixed(1)}%</td>
               <td>${renderSemaforo(d.ICov_j)}</td>
             </tr>
           `).join('')}
+          <tr class="fw-semibold"><td>Total</td><td>${fmt(totalCupos)}</td><td colspan="2"></td><td>${fmt(totalDemanda)}</td><td>100%</td><td>${renderSemaforo(resultado.ICov)}</td></tr>
         </tbody>
       </table>
     </div>
-    <div class="fs-5"><strong>ICov agregado:</strong> ${renderSemaforo(resultado.ICov)}</div>
+    <div class="fs-5 mb-1"><strong>Cobertura actual (ICov):</strong> ${renderSemaforo(resultado.ICov)}</div>
+    <div class="mb-1">${lectura}</div>
+    <div class="small text-muted">
+      <span class="badge bg-success">verde</span> 80% o más: la oferta casi alcanza ·
+      <span class="badge bg-warning text-dark">amarillo</span> 50% a 80%: déficit moderado ·
+      <span class="badge bg-danger">rojo</span> menos de 50%: déficit severo
+    </div>
+    <details class="small text-muted mt-1">
+      <summary>¿Cómo se calcula?</summary>
+      Cobertura de cada nivel = Cupos ÷ Demanda, con un máximo de 100% (ICov<sub>j</sub> = O<sub>j</sub> / D<sub>j,min</sub>, donde D<sub>j,min</sub> = M<sub>j</sub> + LE<sub>j</sub>).
+      La cobertura total es el promedio de los niveles ponderado por su demanda (w<sub>j</sub> = D<sub>j,min</sub> / ΣD).
+    </details>
   `;
 }
 
@@ -4517,6 +4618,7 @@ function calcularICovRed() {
   renderResultadoICov(icov.resultado);
   calcularINS();
   renderPoblacionDetalladaPorSexo();
+  renderEstadoPasosICov();
   return icov.resultado;
 }
 
@@ -4903,6 +5005,8 @@ function calcularProyeccionDemanda(parametros) {
   APP_STATE.proyecto.diagnostico.proyeccion_demanda.resultado = resultado;
   guardarEstadoConDebounce();
   renderGraficoProyeccion(resultado);
+  renderPoblacionDetalladaPorSexo();
+  renderEstadoPasosICov();
   return resultado;
 }
 

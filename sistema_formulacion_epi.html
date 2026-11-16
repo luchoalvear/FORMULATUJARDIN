@@ -2475,7 +2475,8 @@ function mostrarPantallaAdministracion() {
 
 async function apiAdmin(path, method, body) {
   // La clave de administración viaja en una cabecera (no en la URL), para que no quede en logs ni en el historial.
-  const opciones = { method, headers: { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY_ACTUAL } };
+  // encodeURIComponent: la cabecera solo admite ciertos caracteres (una clave con tildes o ñ fallaría)
+  const opciones = { method, headers: { 'Content-Type': 'application/json', 'X-Admin-Key': encodeURIComponent((ADMIN_KEY_ACTUAL || '').trim()) } };
   if (method === 'POST' || method === 'PUT') opciones.body = JSON.stringify(body || {});
   const resp = await fetch(path, opciones);
   const data = await resp.json().catch(() => ({}));
@@ -2664,7 +2665,7 @@ async function procesarRegistro(event) {
   try {
     const resp = await fetch(API_BASE + '/registro', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': admin_key },
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': encodeURIComponent((admin_key || '').trim()) },
       body: JSON.stringify({ nombre, username, password, institucion })
     });
     const json = await resp.json();

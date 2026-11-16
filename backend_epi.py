@@ -385,7 +385,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return (qs.get('admin_key') or [''])[0]
 
     def _admin_autorizado(self, clave):
-        return bool(ADMIN_KEY) and secrets.compare_digest(clave or '', ADMIN_KEY)
+        # Se compara en bytes UTF-8 (compare_digest falla con texto no ASCII: tildes, ñ) e ignorando
+        # espacios sobrantes. El frontend envía la clave codificada (encodeURIComponent) en la cabecera,
+        # porque las cabeceras HTTP no admiten cualquier carácter; se acepta también sin codificar.
+        esperada = ADMIN_KEY.strip()
+        if not esperada:
+            return False
+        recibida = (clave or '').strip()
+        candidatos = {recibida}
+        try:
+            candidatos.add(urllib.parse.unquote(recibida, errors='strict'))
+        except Exception:
+            pass
+        try:
+            # Una cabecera sin codificar con tildes llega decodificada como latin-1
+            candidatos.add(recibida.encode('latin-1').decode('utf-8'))
+        except Exception:
+            pass
+        esperada_b = esperada.encode('utf-8')
+        return any(secrets.compare_digest(c.encode('utf-8'), esperada_b) for c in candidatos if c)
 
     def do_OPTIONS(self):
         self.send_response(204)

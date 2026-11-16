@@ -26,7 +26,7 @@ Code leerá el archivo y continuará sin reescribir lo anterior.
 **PASO 4 — Verificación final**
 
 Al terminar, pídele:
-> "Revisa el archivo completo y verifica: (1) que no haya funciones llamadas pero no definidas, (2) que todos los módulos del sidebar estén conectados a sus funciones de render, (3) que el cálculo de CAE con los datos de Las Cuncunitas (ICov=0.87, ICal=0.45, 96 cupos, superficie 632m², HA) devuelva un CAE cercano a los valores de referencia de la demo, (4) que la Dotación Teórica según Decreto 181 con los cupos de Cuncunitas (40 SC + 56 NM) reproduzca exactamente 9 cargos calculados, (5) que Gastos Administrativos y Material Didáctico con situación actual real (313 m², 84 cupos) reproduzcan $15.861.922 y $34.285.714 respectivamente."
+> "Revisa el archivo completo y verifica: (1) que no haya funciones llamadas pero no definidas, (2) que todos los módulos del sidebar estén conectados a sus funciones de render, (3) que el cálculo de CAE con los datos de Las Cuncunitas (ICov=0.87, ICal=0.45, 96 cupos, superficie 632m², HA) devuelva un CAE cercano a los valores de referencia de la demo, (4) que la Dotación Teórica según el art. 10 del DS 315/2010 con los cupos de Cuncunitas (40 SC + 56 NM) reproduzca el caso de verificación de la sección 7.5, (5) que Gastos Administrativos y Material Didáctico con situación actual real (313 m², 84 cupos) reproduzcan $15.861.922 y $34.285.714 respectivamente."
 
 **LO QUE NO HACER:**
 - No pidas "hazlo todo de una vez" sin el esqueleto previo
@@ -510,44 +510,25 @@ function sugerirMaterialDidacticoProyecto() {
 
 Cada fila de Material Didáctico y Gastos Administrativos muestra el valor "Sugerido" con un botón "usar" que aplica el cálculo al campo "Situación con Proyecto" (`btn-usar-sugerido`, no automático — el usuario decide cuándo aplicarlo). Nota fija bajo la tabla citando la fuente y aclarando que es un valor de referencia editable.
 
-### 7.5 Dotación Teórica según Decreto N°181 (2005, MINEDUC)
+### 7.5 Dotación Teórica según coeficientes técnicos (art. 10 DS N°315/2010, MINEDUC)
 
-> **Pendiente de validación normativa:** para jardines con Reconocimiento Oficial, el coeficiente técnico exigible está en el art. 10 del DS N°315/2010, modificado por el DS N°241/2017 (vigencia postergada por decretos posteriores, el último de marzo de 2026). La calculadora muestra este aviso; confirmar coeficientes antes de usarlos en un EPI.
+Fuente: artículo 10 del DS N°315/2010 (requisitos del Reconocimiento Oficial), modificado por el DS N°241/2017. La vigencia de las cifras del DS 241 fue postergada (DS 155/2021, DS 217/2022 y DS 219/2026, D.O. 03-03-2026): las letras d), f) y g) del N°3 del DS 241 son exigibles desde el **01-01-2028**. Texto consultado en Ley Chile (BCN), versión 03-03-2026. *(Reemplaza al antiguo Decreto N°181/2005, que la versión anterior del sistema usaba.)*
 
-Coeficientes de dotación mínima por razón niño/adulto (Decreto 181, que modifica el Decreto 177/1996):
+| Cargo | DS 315 + DS 241 (desde 01-01-2028, **por defecto**) | DS 315 transitorio (hasta 31-12-2027) |
+|---|---|---|
+| Director(a)/Coordinador(a) | 1 por establecimiento | 1 por establecimiento |
+| Educadora Sala Cuna | 1 cada 21 lactantes | 1 cada 42 lactantes |
+| Técnico Sala Cuna | 1 cada 7 lactantes | 1 cada 7 lactantes |
+| Manipuladora Sala Cuna | 1 cada 40 lactantes | 1 cada 40 lactantes |
+| Educadora Nivel Medio Menor / Mayor | 1 cada 28 / 1 cada 28 (por nivel) | 1 cada 32 / 1 cada 32 (por nivel) |
+| Técnico Nivel Medio Menor | 1 cada 14 niños | 1 cada 25 niños |
+| Técnico Nivel Medio Mayor | 1 cada 14 niños | 1 cada 32 niños |
+| Manipuladora Niveles Medios | 1 cada 70 niños | 1 cada 70 niños |
+| Auxiliar de Servicios Menores | 1 cada 100 niños | 1 cada 100 niños |
 
-| Cargo | Razón |
-|---|---|
-| Director(a)/Coordinador(a) | 1 fijo por establecimiento |
-| Educadora Sala Cuna | 1 cada 40 lactantes |
-| Técnico Sala Cuna | 1 cada 6 lactantes |
-| Manipuladora de Alimentos Sala Cuna | 1 cada 40 lactantes |
-| Educadora Nivel Medio | 1 cada 48 niños |
-| Técnico Nivel Medio Menor | 1 cada 12 niños |
-| Técnico Nivel Medio Mayor | 1 cada 16 niños |
-| Manipuladora de Alimentos Niveles Medios | 1 cada 70 niños |
-| Auxiliar de Servicios Menores | 1 cada 100 niños (todo el establecimiento) |
+Implementación: `NORMATIVA_COEFICIENTES` (un objeto por régimen, con `vigente_desde`/`vigente_hasta` y coeficientes `c`) y `NORMATIVA_COEFICIENTES_DEFECTO = 'ds241_2028'`. El régimen elegido se guarda en `proyecto.modelo_gestion.normativa_coeficientes` y se aplica **igual** a la situación actual y a la con proyecto (el incremental refleja el proyecto, no el cambio normativo). Para un decreto nuevo basta con agregar o editar un régimen. Los ids de `DOTACION_DTO181` (director, educadora_sc, tecnico_sc, manipuladora_sc, educadora_nm, tecnico_nmm, tecnico_nmmy, manipuladora_nm, auxiliar) se mantienen por compatibilidad con proyectos guardados. Nivel Medio actual: desglose real NMM/NMMy del Módulo 3; Nivel Medio proyectado: mitad y mitad (`repartirNivelMedio`). Si un cargo con dotación > 0 no tiene costo por persona, "Aplicar" se bloquea con aviso (evita dejar Personal en $0).
 
-```javascript
-const DOTACION_DTO181 = [
-  { id: 'director', nombre: '...', calc: (sc, nm) => (sc+nm) > 0 ? 1 : 0 },
-  { id: 'educadora_sc', nombre: '...', calc: (sc) => Math.ceil(sc / 40) },
-  { id: 'tecnico_sc', nombre: '...', calc: (sc) => Math.ceil(sc / 6) },
-  { id: 'manipuladora_sc', nombre: '...', calc: (sc) => Math.ceil(sc / 40) },
-  { id: 'educadora_nm', nombre: '...', calc: (sc, nm) => Math.ceil(nm / 48) },
-  { id: 'tecnico_nmm', nombre: '...', calc: (sc, nm) => Math.ceil((nm/2) / 12) },
-  { id: 'tecnico_nmmy', nombre: '...', calc: (sc, nm) => Math.ceil((nm/2) / 16) },
-  { id: 'manipuladora_nm', nombre: '...', calc: (sc, nm) => Math.ceil(nm / 70) },
-  { id: 'auxiliar', nombre: '...', calc: (sc, nm) => Math.ceil((sc+nm) / 100) }
-];
-
-function obtenerCuposActualesPorNivel() {
-  if (esConstruccionNueva()) return { sc: 0, nm: 0 }; // no existe situación actual
-  const niveles = p.diagnostico.icov.niveles || {};
-  const get = cod => (niveles[cod]?.activo) ? (niveles[cod].O || 0) : 0;
-  return { sc: get('SCM') + get('SCMy'), nm: get('NMM') + get('NMMy') };
-}
-```
+Caso de verificación (40 SC + 56 NM = 28 NMM + 28 NMMy): desde 2028 → director 1, educadora SC 2, técnico SC 6, manipuladora SC 1, educadora NM 2, técnico NMM 2, técnico NMMy 2, manipuladora NM 1, auxiliar 1. Transitorio → educadora SC 1 y técnico NMMy 1 (resto igual).
 
 **Escala Única de Sueldos (EUS)** — `ESCALA_REMUNERACIONES_EUS_2025`: remuneraciones brutas mensuales año 2025 (fuente: planilla oficial de grados/remuneraciones del sector público, columna "Remuneración Bruta Mensual con Asig. de Modernización"), llevadas a **UF** con la UF del 31-12-2024 ($38.416,69), agrupadas por categoría (`DIR / C.T.`, `PROF / C.T.`, `TEC.ADM.AUX / C.T.`, `TEC / S.T.`, `ADM / S.T.`, `AUX / S.T.` — C.T.=Con Título, S.T.=Sin Título) y grado.
 
@@ -560,7 +541,7 @@ function sueldoAnualDesdeGrado(categoria, grado, valorUf) {
 
 **Calculadora en Módulo 7, dentro de Costos de Operación** (`renderCalculadoraDotacionDTO181`, contenedor `#calc-dotacion-dto181-m7`):
 - Input **"Valor UF para sueldos"** (editable, default $39.727,96 = UF del 31-12-2025) + fecha de esa UF. Nota fija: **"Usa siempre la UF del 31 de diciembre del año anterior para calcular los sueldos teóricos del año en curso"** (ej.: en 2026 se usa la UF del 31-12-2025).
-- Por cada cargo del Decreto 181 visible (dotación actual o proyectada > 0): dotación actual (calculada, no editable), dotación proyectada (calculada), un `<select>` con optgroups por categoría EUS que autocompleta el costo anual por persona al elegir un grado, y el campo de costo **siempre editable manualmente** (si se elige "— Ingresar manualmente —" o se escribe directo, no se pisa).
+- Selector de régimen de coeficientes (`#normativa-coeficientes`). Por cada cargo visible (dotación actual o proyectada > 0): dotación actual (calculada, no editable), dotación proyectada (calculada), un `<select>` con optgroups por categoría EUS que autocompleta el costo anual por persona al elegir un grado, y el campo de costo **siempre editable manualmente** (si se elige "— Ingresar manualmente —" o se escribe directo, no se pisa).
 - Al cambiar el Valor UF, **recalcular automáticamente** solo los costos derivados de un grado seleccionado (los tipeados a mano quedan intactos).
 - Botón **"Aplicar dotación teórica a Personal (O&M) y al Modelo de Gestión"** (confirmación de doble clic si la tabla de dotación del Módulo 9 ya tiene filas): calcula el total (Σ dotación × costo por persona) para actual y proyectada, lo escribe en `costos_om.personal.actual/.proyecto` (alimenta el CAE), y guarda el detalle itemizado en `proyecto.modelo_gestion.dotacion` (alimenta el Módulo 9). **La tabla de dotación es la fuente de la cifra agregada de Personal** — igual que en un CCOM real, donde el total de la tabla de dotación coincide exactamente con la línea "Personal" del cuadro de costos de operación.
 
@@ -733,7 +714,7 @@ Sistema de toasts (esquina inferior derecha) para confirmar guardados, errores d
 - `PLANILLA_ICAL`: checklist normativo completo (ver Módulo 4).
 - `PRECIOS_UNITARIOS_DEFAULT`: precios de equipamiento por categoría (ver Módulo 6).
 - `BD_JARDINES_COORDS` / `BD_OTROS_ESTABLECIMIENTOS`: coordenadas reales JUNJI/INTEGRA/Privados (ver Módulo 2).
-- `DOTACION_DTO181` / `ESCALA_REMUNERACIONES_EUS_2025`: coeficientes del Decreto 181 y escala de sueldos (ver Módulo 7.5).
+- `NORMATIVA_COEFICIENTES` / `DOTACION_DTO181` / `ESCALA_REMUNERACIONES_EUS_2025`: coeficientes técnicos del DS 315/2010 (con DS 241/2017) y escala de sueldos (ver Módulo 7.5).
 - `REFERENCIA_GASTOS_ADMIN_M2` / `REFERENCIA_MATERIAL_DIDACTICO_CUPO`: referencias teóricas de O&M (ver Módulo 7.4).
 - `EJEMPLO_DEMO`: proyecto "JI Las Cuncunitas" completo, precargado con el botón **"Ingresar a Demo"** (pantalla de login) — usar valores internamente consistentes entre sí (`alternativa_ganadora` debe calzar exactamente con el `nombre` de una de las `alternativas[]`, para que el CAE por cupo no quede "N/D" en la ficha resumen).
 
@@ -757,7 +738,7 @@ Al entrar por "Ingresar a Demo" (o al abrir el demo local desde "Mis Proyectos" 
 6. Alternativas: mínimo 2 para calcular VAC/CAE (excepto en modo Actualización de Diseño, que usa 1 sola).
 7. **Comparabilidad de materialidad**: alertar si las alternativas activas mezclan grupo `pesado` y `liviano`.
 8. Costos de Operación y Mantención: alimentar VAC/CAE siempre con el **incremental**, nunca el monto total "con proyecto".
-9. Construcción nueva: bloquear en 0 los campos "situación actual" de superficie, dotación y costos O&M; usar referencias teóricas (Decreto 181, $/m², $/cupo).
+9. Construcción nueva: bloquear en 0 los campos "situación actual" de superficie, dotación y costos O&M; usar referencias teóricas (coeficientes DS 315/2010, $/m², $/cupo).
 10. Claude API: si no hay API key configurada, deshabilitar botones de IA con mensaje explicativo, y mostrar el mismo aviso en Módulo 8 y Módulo 9.
 11. Documentos adjuntos (Conservación/Exento): deshabilitar la sección con aviso si el proyecto no está guardado en el backend (modo demo sin cuenta).
 
@@ -765,13 +746,13 @@ Al entrar por "Ingresar a Demo" (o al abrir el demo local desde "Mis Proyectos" 
 
 ## CRITERIOS DE CALIDAD OBLIGATORIOS
 
-- [ ] Todos los cálculos (ICov, ICal, INS, VAC, CAE, Dotación DTO-181, Gastos Administrativos/Material Didáctico teóricos) producen resultados correctos con los datos de Las Cuncunitas.
+- [ ] Todos los cálculos (ICov, ICal, INS, VAC, CAE, Dotación según DS 315/2010, Gastos Administrativos/Material Didáctico teóricos) producen resultados correctos con los datos de Las Cuncunitas.
 - [ ] El mapa Leaflet carga, geocodifica, y ubica vecinos usando `BD_JARDINES_COORDS`/`BD_OTROS_ESTABLECIMIENTOS` antes de recurrir a Nominatim.
 - [ ] La integración con Claude API funciona vía `proxy_claude.py`, y ningún texto generado deja rastros de Markdown (`#`, `**`, `-`) en el textarea ni en el .docx exportado.
 - [ ] Con `backend_epi.py` corriendo: registro, login, `GET /api/me`, múltiples proyectos por cuenta, aislamiento entre cuentas, subida/descarga/eliminación de documentos adjuntos.
 - [ ] El modo demo/invitado sigue funcionando sin `backend_epi.py`, persistiendo en `localStorage`.
 - [ ] Cambiar `tipo_proceso` a "Construcción" oculta el checklist de ICal, ajusta el INS a `=ICov`, y bloquea en 0 los campos "situación actual" del Módulo 7 — y todo se revierte correctamente al volver a "Reposición" u otra tipología.
-- [ ] La Calculadora de Dotación DTO-181 con cupos 40 SC + 56 NM reproduce exactamente los 9 cargos y sus cantidades (Educadora SC: 1, Técnico SC: 7, Educadora NM: 2, Técnico NMM: 3, Técnico NMMy: 2, etc.), y "Aplicar" sincroniza `costos_om.personal` con la tabla de Dotación del Módulo 9.
+- [ ] La Calculadora de Dotación (art. 10 DS 315/2010) con cupos 40 SC + 56 NM reproduce el caso de verificación de 7.5 para ambos regímenes, y "Aplicar" sincroniza `costos_om.personal` con la tabla de Dotación del Módulo 9.
 - [ ] Los presupuestos de materialidad (HA/ALB/METALCON/SIP) se reajustan correctamente al cambiar el Valor UF, y la alerta de comparabilidad de grupo aparece cuando corresponde.
 - [ ] El Modelo de Gestión se genera siempre (sin toggle), usa en vivo los datos de `costos_om` y las tablas de Dotación/Cronograma ya cargadas, y el total de la tabla de Dotación coincide con la línea "Personal" de Costos de Operación en el documento exportado.
 - [ ] La exportación JSON, Excel (con fórmulas), todos los documentos Word (CCOM, Conservación, Modelo de Gestión, etc.) y el PDF del EPI completo (`generarEPICompletoPDF`) funcionan sin errores de consola.

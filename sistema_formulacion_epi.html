@@ -1790,26 +1790,76 @@ function sugerirMaterialDidacticoProyecto() {
   return Math.round(REFERENCIA_MATERIAL_DIDACTICO_CUPO * cuposProyecto);
 }
 
-// Dotación mínima de personal exigida por el Decreto Nº 181 (2005, MINEDUC, que modifica el
-// Decreto Nº 177/1996) para establecimientos de educación parvularia, según razón niño/adulto
-// por nivel. Cada entrada calcula la dotación teórica (redondeada hacia arriba) a partir de los
-// cupos de Sala Cuna (cupos_sc) y Nivel Medio (cupos_nm) del establecimiento — únicos niveles que
-// diseña el Programa Arquitectónico (Módulo 5) de este sistema.
+// Dotación mínima de personal para educación parvularia según el artículo 10 del DS N°315/2010
+// (MINEDUC, requisitos del Reconocimiento Oficial), modificado por el DS N°241/2017. La vigencia de
+// las cifras del DS 241 (art. 2° transitorio) fue postergada por los DS N°155/2021, N°217/2022 y,
+// por último, N°219/2026 (D.O. 03-03-2026): las letras d), f) y g) del N°3 del DS 241 — educadora de
+// sala cuna 1/21, nivel medio menor 1/28 y 1/14, nivel medio mayor 1/28 y 1/14 — son exigibles desde
+// el 01-01-2028. Hasta entonces rigen las cifras anteriores del DS 315 (texto del DS 115/2012).
+// Fuente: Ley Chile (BCN), DS 315 idNorma 1026910 y DS 241 idNorma 1124398, versión 03-03-2026.
+//
+// Para actualizar la plataforma ante un nuevo decreto: agregar o editar un régimen aquí.
+const NORMATIVA_COEFICIENTES = {
+  ds241_2028: {
+    nombre: 'DS 315/2010 con DS 241/2017 — exigible desde el 01-01-2028',
+    corto: 'DS 315 + DS 241 (desde 2028)',
+    vigente_desde: '2028-01-01', vigente_hasta: null,
+    c: { educadora_sc: 21, tecnico_sc: 7, manipuladora_sc: 40, educadora_nmm: 28, tecnico_nmm: 14, educadora_nmmy: 28, tecnico_nmmy: 14, manipuladora_nm: 70, auxiliar: 100 }
+  },
+  ds315_hasta_2027: {
+    nombre: 'DS 315/2010 (texto DS 115/2012) — exigible hasta el 31-12-2027',
+    corto: 'DS 315 transitorio (hasta 2027)',
+    vigente_desde: null, vigente_hasta: '2027-12-31',
+    c: { educadora_sc: 42, tecnico_sc: 7, manipuladora_sc: 40, educadora_nmm: 32, tecnico_nmm: 25, educadora_nmmy: 32, tecnico_nmmy: 32, manipuladora_nm: 70, auxiliar: 100 }
+  }
+};
+// Por defecto se usa la norma que regirá durante la operación del proyecto: un proyecto que hoy se
+// formula entra en operación después de 2027. Se aplica la MISMA norma a la situación actual y a la
+// situación con proyecto, para que el costo incremental refleje el proyecto y no el cambio normativo.
+const NORMATIVA_COEFICIENTES_DEFECTO = 'ds241_2028';
+
+function normativaCoeficientesActiva() {
+  const mg = APP_STATE.proyecto && APP_STATE.proyecto.modelo_gestion;
+  const clave = (mg && mg.normativa_coeficientes) || NORMATIVA_COEFICIENTES_DEFECTO;
+  return NORMATIVA_COEFICIENTES[clave] ? clave : NORMATIVA_COEFICIENTES_DEFECTO;
+}
+
+// Reparte cupos de Nivel Medio en Medio Menor / Medio Mayor cuando no se conoce el desglose
+// (el Programa Arquitectónico solo define el total de Nivel Medio): mitad y mitad.
+function repartirNivelMedio(nm) {
+  const nmm = Math.ceil((nm || 0) / 2);
+  return { nmm, nmmy: (nm || 0) - nmm };
+}
+
+// Los ids se mantienen (director, educadora_sc, ...) para no perder grados/sueldos ya guardados.
 const DOTACION_DTO181 = [
-  { id: 'director', nombre: 'Director(a) / Coordinador(a) del Nivel Parvulario', calc: (sc, nm) => (sc + nm) > 0 ? 1 : 0 },
-  { id: 'educadora_sc', nombre: 'Educadora de Párvulos — Sala Cuna (máx. 40 lactantes/educadora)', calc: (sc) => Math.ceil(sc / 40) },
-  { id: 'tecnico_sc', nombre: 'Técnico en Ed. Parvularia — Sala Cuna (máx. 6 lactantes/técnico)', calc: (sc) => Math.ceil(sc / 6) },
-  { id: 'manipuladora_sc', nombre: 'Manipuladora de Alimentos — Sala Cuna (máx. 40 lactantes)', calc: (sc) => Math.ceil(sc / 40) },
-  { id: 'educadora_nm', nombre: 'Educadora de Párvulos — Nivel Medio (máx. 48 niños/educadora)', calc: (sc, nm) => Math.ceil(nm / 48) },
-  { id: 'tecnico_nmm', nombre: 'Técnico en Ed. Parvularia — Nivel Medio Menor (máx. 12 niños/técnico)', calc: (sc, nm) => Math.ceil((nm / 2) / 12) },
-  { id: 'tecnico_nmmy', nombre: 'Técnico en Ed. Parvularia — Nivel Medio Mayor (máx. 16 niños/técnico)', calc: (sc, nm) => Math.ceil((nm / 2) / 16) },
-  { id: 'manipuladora_nm', nombre: 'Manipuladora de Alimentos — Niveles Medios (máx. 70 niños)', calc: (sc, nm) => Math.ceil(nm / 70) },
-  { id: 'auxiliar', nombre: 'Auxiliar de Servicios Menores (máx. 100 niños, todo el establecimiento)', calc: (sc, nm) => Math.ceil((sc + nm) / 100) }
+  { id: 'director', nombre: () => 'Director(a) / Coordinador(a) del Nivel Parvulario (1 por establecimiento)', calc: (x) => (x.sc + x.nmm + x.nmmy) > 0 ? 1 : 0 },
+  { id: 'educadora_sc', nombre: (c) => `Educadora de Párvulos — Sala Cuna (1 cada ${c.educadora_sc} lactantes)`, calc: (x, c) => Math.ceil(x.sc / c.educadora_sc) },
+  { id: 'tecnico_sc', nombre: (c) => `Técnico en Ed. Parvularia — Sala Cuna (1 cada ${c.tecnico_sc} lactantes)`, calc: (x, c) => Math.ceil(x.sc / c.tecnico_sc) },
+  { id: 'manipuladora_sc', nombre: (c) => `Manipuladora de Alimentos — Sala Cuna (1 cada ${c.manipuladora_sc} lactantes)`, calc: (x, c) => Math.ceil(x.sc / c.manipuladora_sc) },
+  { id: 'educadora_nm', nombre: (c) => c.educadora_nmm === c.educadora_nmmy
+      ? `Educadora de Párvulos — Niveles Medios (1 cada ${c.educadora_nmm} niños, por nivel)`
+      : `Educadora de Párvulos — Niveles Medios (Menor 1/${c.educadora_nmm}, Mayor 1/${c.educadora_nmmy})`,
+    calc: (x, c) => Math.ceil(x.nmm / c.educadora_nmm) + Math.ceil(x.nmmy / c.educadora_nmmy) },
+  { id: 'tecnico_nmm', nombre: (c) => `Técnico en Ed. Parvularia — Nivel Medio Menor (1 cada ${c.tecnico_nmm} niños)`, calc: (x, c) => Math.ceil(x.nmm / c.tecnico_nmm) },
+  { id: 'tecnico_nmmy', nombre: (c) => `Técnico en Ed. Parvularia — Nivel Medio Mayor (1 cada ${c.tecnico_nmmy} niños)`, calc: (x, c) => Math.ceil(x.nmmy / c.tecnico_nmmy) },
+  { id: 'manipuladora_nm', nombre: (c) => `Manipuladora de Alimentos — Niveles Medios (1 cada ${c.manipuladora_nm} niños)`, calc: (x, c) => Math.ceil((x.nmm + x.nmmy) / c.manipuladora_nm) },
+  { id: 'auxiliar', nombre: (c) => `Auxiliar de Servicios Menores (1 cada ${c.auxiliar} niños, todo el establecimiento)`, calc: (x, c) => Math.ceil((x.sc + x.nmm + x.nmmy) / c.auxiliar) }
 ];
 
-function calcularDotacionTeoricaDTO181(cupos_sc, cupos_nm) {
-  const sc = cupos_sc || 0, nm = cupos_nm || 0;
-  return DOTACION_DTO181.map(d => ({ id: d.id, nombre: d.nombre, dotacion: sc === 0 && nm === 0 ? 0 : d.calc(sc, nm) }));
+function nombreCargoDotacion(d, clave) {
+  return d.nombre(NORMATIVA_COEFICIENTES[clave || normativaCoeficientesActiva()].c);
+}
+
+// cupos_nm_detalle (opcional): { nmm, nmmy } cuando se conoce el desglose real por nivel.
+function calcularDotacionTeoricaDTO181(cupos_sc, cupos_nm, cupos_nm_detalle, claveNormativa) {
+  const sc = cupos_sc || 0;
+  const reparto = cupos_nm_detalle || repartirNivelMedio(cupos_nm || 0);
+  const x = { sc, nmm: reparto.nmm || 0, nmmy: reparto.nmmy || 0 };
+  const clave = claveNormativa || normativaCoeficientesActiva();
+  const c = NORMATIVA_COEFICIENTES[clave].c;
+  const vacio = x.sc + x.nmm + x.nmmy === 0;
+  return DOTACION_DTO181.map(d => ({ id: d.id, nombre: d.nombre(c), dotacion: vacio ? 0 : d.calc(x, c) }));
 }
 
 function inicializarModeloGestion(p) {
@@ -2241,6 +2291,7 @@ let APP_STATE = {
       riesgos: [],     // { riesgo, efecto, mitigacion }
       salarios_dto181: {}, // { [cargo_id]: costo_anual_por_persona }
       grados_dto181: {},   // { [cargo_id]: { categoria, grado } } — grado EUS seleccionado, si aplica
+      normativa_coeficientes: 'ds241_2028', // régimen de coeficientes técnicos (ver NORMATIVA_COEFICIENTES)
       valor_uf_remuneraciones: 39727.96, // UF del 31-12-2025 (año anterior al actual, 2026)
       fecha_uf_remuneraciones: '2025-12-31'
     }
@@ -5872,7 +5923,7 @@ function renderCostosOM() {
       <button class="btn btn-outline-success btn-sm" id="btn-generar-ccom"><i class="bi bi-file-earmark-word"></i> Generar Certificado CCOM</button>
     </div>
     <div class="small text-muted mb-2">Situación Actual vs. Situación con Proyecto. El <strong>incremental</strong> (con proyecto − actual) es el que alimenta el cálculo de VAC/CAE. Personal, Material Didáctico y Gastos Administrativos son iguales para todas las alternativas — dependen de los cupos, no de la materialidad. La Mantención "con proyecto" varía por alternativa (se define más abajo, en cada tarjeta).</div>
-    ${esNueva ? `<div class="alert alert-info small">Proyecto de <strong>Construcción</strong> (establecimiento nuevo): la situación actual queda bloqueada en 0 — no existe infraestructura, dotación ni gasto que medir. Los montos "con proyecto" se estiman con las referencias teóricas (Decreto N°181 y $/m², $/cupo de Las Cuncunitas).</div>` : ''}
+    ${esNueva ? `<div class="alert alert-info small">Proyecto de <strong>Construcción</strong> (establecimiento nuevo): la situación actual queda bloqueada en 0 — no existe infraestructura, dotación ni gasto que medir. Los montos "con proyecto" se estiman con las referencias teóricas (coeficientes del DS N°315/2010 y $/m², $/cupo de Las Cuncunitas).</div>` : ''}
 
     <div class="row g-2 align-items-end mb-2">
       <div class="col-md-4">
@@ -5916,7 +5967,7 @@ function renderCostosOM() {
     <div class="form-text mb-2">${NOTA_REFERENCIA_GASTOS_OPERACION}</div>
 
     <hr>
-    <h6 class="mb-2">Calculadora de Dotación Teórica (Decreto N°181, 2005 — MINEDUC)</h6>
+    <h6 class="mb-2">Calculadora de Dotación Teórica (coeficientes técnicos art. 10 DS N°315/2010 — MINEDUC)</h6>
     <div id="calc-dotacion-dto181-m7"></div>
   `;
 
@@ -9136,7 +9187,7 @@ function renderSeccionModeloGestion() {
         </div>
         ${eje === 'rrhh' ? `
           <hr><h6 class="mt-3">Tabla de Dotación de Personal</h6>
-          <div class="form-text mb-2">Se calcula en el Módulo 7 (Evaluación Económica) → Calculadora de Dotación Teórica (Decreto N°181), donde alimenta directamente el costo "Personal" de los Costos de Operación. Aquí puedes seguir editándola libremente para reflejar la dotación real (si se contrata más personal del mínimo exigido, esa es la cifra que debe quedar).</div>
+          <div class="form-text mb-2">Se calcula en el Módulo 7 (Evaluación Económica) → Calculadora de Dotación Teórica (coeficientes del DS N°315/2010), donde alimenta directamente el costo "Personal" de los Costos de Operación. Aquí puedes seguir editándola libremente para reflejar la dotación real (si se contrata más personal del mínimo exigido, esa es la cifra que debe quedar).</div>
           <div id="tabla-dotacion-gestion"></div>
           <button class="btn btn-sm btn-outline-primary" id="btn-agregar-dotacion">+ Agregar cargo</button>
         ` : ''}
@@ -9175,10 +9226,11 @@ function renderSeccionModeloGestion() {
 }
 
 function obtenerCuposActualesPorNivel() {
-  if (esConstruccionNueva()) return { sc: 0, nm: 0 };
+  if (esConstruccionNueva()) return { sc: 0, nm: 0, nmm: 0, nmmy: 0 };
   const niveles = APP_STATE.proyecto.diagnostico.icov.niveles || {};
   const get = (cod) => (niveles[cod] && niveles[cod].activo) ? (niveles[cod].O || 0) : 0;
-  return { sc: get('SCM') + get('SCMy'), nm: get('NMM') + get('NMMy') };
+  // Se conserva el desglose real Medio Menor / Medio Mayor (cada nivel tiene su propio coeficiente)
+  return { sc: get('SCM') + get('SCMy'), nm: get('NMM') + get('NMMy'), nmm: get('NMM'), nmmy: get('NMMy') };
 }
 
 function construirOpcionesEscalaSueldos(valorUf, seleccion) {
@@ -9204,20 +9256,32 @@ function renderCalculadoraDotacionDTO181() {
   const actuales = obtenerCuposActualesPorNivel();
   const sc_proy = p.programa_arq.cupos_sc || 0;
   const nm_proy = p.programa_arq.cupos_nm || 0;
-  const filasActual = calcularDotacionTeoricaDTO181(actuales.sc, actuales.nm);
-  const filasProy = calcularDotacionTeoricaDTO181(sc_proy, nm_proy);
+  const claveNorma = normativaCoeficientesActiva();
+  const norma = NORMATIVA_COEFICIENTES[claveNorma];
+  const filasActual = calcularDotacionTeoricaDTO181(actuales.sc, actuales.nm, { nmm: actuales.nmm, nmmy: actuales.nmmy }, claveNorma);
+  const filasProy = calcularDotacionTeoricaDTO181(sc_proy, nm_proy, null, claveNorma);
   const salarios = mg.salarios_dto181;
   const grados = mg.grados_dto181;
+  const hoyISO = new Date().toISOString().slice(0, 10);
+  const normaVencida = norma.vigente_hasta && hoyISO > norma.vigente_hasta;
 
   const filasVisibles = DOTACION_DTO181.map((d, i) => ({ d, actual: filasActual[i].dotacion, proy: filasProy[i].dotacion })).filter(f => f.actual > 0 || f.proy > 0);
 
   cont.innerHTML = `
-    <div class="alert alert-warning small py-2 mb-2">
-      <i class="bi bi-exclamation-triangle"></i> <strong>Revisar normativa vigente:</strong> estos coeficientes provienen del Decreto N°181/2005.
-      Para jardines con Reconocimiento Oficial, el coeficiente técnico exigible está en el artículo 10 del DS N°315/2010 (MINEDUC),
-      modificado por el DS N°241/2017, cuya entrada en vigencia ha sido postergada por decretos posteriores (el último, publicado en marzo de 2026).
-      Confirma los coeficientes aplicables al año de evaluación antes de usar esta dotación en el EPI.
+    <div class="row g-2 align-items-end mb-2">
+      <div class="col-md-9">
+        <label class="form-label small mb-0" for="normativa-coeficientes">Coeficientes técnicos (art. 10 DS N°315/2010, Reconocimiento Oficial)</label>
+        <select class="form-select form-select-sm" id="normativa-coeficientes">
+          ${Object.entries(NORMATIVA_COEFICIENTES).map(([k, n]) => `<option value="${k}" ${k === claveNorma ? 'selected' : ''}>${n.nombre}${k === NORMATIVA_COEFICIENTES_DEFECTO ? ' (recomendado)' : ''}</option>`).join('')}
+        </select>
+      </div>
     </div>
+    <div class="form-text mb-2">
+      El DS N°241/2017 sube la exigencia (sala cuna: 1 educadora cada 21 lactantes; niveles medios: 1 educadora cada 28 y 1 técnico cada 14). Su entrada en vigencia fue postergada y, según el DS N°219 (D.O. 03-03-2026), es exigible desde el <strong>01-01-2028</strong>.
+      Como el proyecto operará durante ese período, se recomienda usar esas cifras. La misma norma se aplica a la situación actual y a la situación con proyecto, para que el costo incremental refleje el proyecto y no el cambio normativo.
+      Nivel Medio proyectado: se reparte mitad Medio Menor / mitad Medio Mayor; el actual usa el desglose real del Módulo 3.
+    </div>
+    ${normaVencida ? `<div class="alert alert-danger small py-2 mb-2">La norma seleccionada dejó de ser exigible el ${norma.vigente_hasta.split('-').reverse().join('-')}. Selecciona la vigente.</div>` : ''}
     <div class="row g-2 align-items-end mb-2">
       <div class="col-md-5">
         <label class="form-label small mb-0" for="uf-remuneraciones">Valor UF para sueldos ($)</label>
@@ -9233,11 +9297,11 @@ function renderCalculadoraDotacionDTO181() {
     ${filasVisibles.length ? `
     <div class="table-responsive mb-2">
       <table class="table table-sm table-bordered align-middle">
-        <thead><tr><th>Cargo (según Decreto N°181/2005)</th><th style="width:80px">Dot. actual</th><th style="width:80px">Dot. proyectada</th><th style="width:220px">Grado EUS (Escala Única de Sueldos)</th><th style="width:150px">Costo anual por persona ($)</th></tr></thead>
+        <thead><tr><th>Cargo (según ${norma.corto})</th><th style="width:80px">Dot. actual</th><th style="width:80px">Dot. proyectada</th><th style="width:220px">Grado EUS (Escala Única de Sueldos)</th><th style="width:150px">Costo anual por persona ($)</th></tr></thead>
         <tbody>
           ${filasVisibles.map(f => `
             <tr>
-              <td class="small">${f.d.nombre}</td>
+              <td class="small">${nombreCargoDotacion(f.d, claveNorma)}</td>
               <td class="text-center">${f.actual}</td>
               <td class="text-center">${f.proy}</td>
               <td>
@@ -9251,11 +9315,17 @@ function renderCalculadoraDotacionDTO181() {
         </tbody>
       </table>
     </div>
-    <div class="form-text mb-2">Dotación mínima calculada según las razones niño/adulto del Decreto N°181 (2005, MINEDUC). Es un piso normativo: si el establecimiento contrata más personal del exigido, ese es el costo real — puedes seleccionar el grado real de la Escala Única de Sueldos o ingresar el monto manualmente. Al aplicar, esta propuesta reemplaza el costo "Personal" de la tabla de arriba (suma dotación × costo por persona) y queda además detallada, editable, en la Tabla de Dotación del Modelo de Gestión (Módulo 9).</div>
+    <div class="form-text mb-2">Dotación mínima calculada según los coeficientes técnicos del art. 10 del DS N°315/2010 (${norma.corto}). Es un piso normativo: si el establecimiento contrata más personal del exigido, ese es el costo real — puedes seleccionar el grado real de la Escala Única de Sueldos o ingresar el monto manualmente. Al aplicar, esta propuesta reemplaza el costo "Personal" de la tabla de arriba (suma dotación × costo por persona) y queda además detallada, editable, en la Tabla de Dotación del Modelo de Gestión (Módulo 9).</div>
     <button class="btn btn-sm btn-outline-primary" id="btn-aplicar-dotacion-dto181">Aplicar dotación teórica a Personal (O&amp;M) y al Modelo de Gestión</button>
     ` : '<div class="alert alert-secondary py-2 mb-0">Completa los cupos de Sala Cuna / Nivel Medio actuales (Módulo 3) y proyectados (Módulo 5) para calcular la dotación teórica.</div>'}
   `;
 
+  document.getElementById('normativa-coeficientes').addEventListener('change', e => {
+    mg.normativa_coeficientes = e.target.value;
+    guardarEstadoConDebounce();
+    renderCalculadoraDotacionDTO181();
+    mostrarToast('Coeficientes actualizados. Vuelve a "Aplicar dotación teórica" para actualizar el costo de Personal.', 'info');
+  });
   document.getElementById('uf-remuneraciones').addEventListener('change', e => {
     mg.valor_uf_remuneraciones = parseFloat(e.target.value) || 0;
     Object.keys(grados).forEach(id => {
@@ -9316,9 +9386,17 @@ function aplicarDotacionTeoricaDTO181(btn) {
   const actuales = obtenerCuposActualesPorNivel();
   const sc_proy = p.programa_arq.cupos_sc || 0;
   const nm_proy = p.programa_arq.cupos_nm || 0;
-  const filasActual = calcularDotacionTeoricaDTO181(actuales.sc, actuales.nm);
-  const filasProy = calcularDotacionTeoricaDTO181(sc_proy, nm_proy);
+  const claveNorma = normativaCoeficientesActiva();
+  mg.normativa_coeficientes = claveNorma; // deja registrada la norma usada en el proyecto
+  const filasActual = calcularDotacionTeoricaDTO181(actuales.sc, actuales.nm, { nmm: actuales.nmm, nmmy: actuales.nmmy }, claveNorma);
+  const filasProy = calcularDotacionTeoricaDTO181(sc_proy, nm_proy, null, claveNorma);
   const salarios = mg.salarios_dto181 || {};
+  const sinCosto = filasProy.concat(filasActual).filter(f => f.dotacion > 0 && !(salarios[f.id] > 0));
+  if (sinCosto.length) {
+    const nombres = [...new Set(sinCosto.map(f => f.nombre.split(' (')[0]))];
+    mostrarToast(`Falta el costo anual por persona de: ${nombres.join('; ')}. Elige un grado EUS o ingresa el monto antes de aplicar (si no, el costo de Personal quedaría subestimado).`, 'warning');
+    return;
+  }
 
   let totalPersonalActual = 0, totalPersonalProyecto = 0;
   mg.dotacion = DOTACION_DTO181.map((d, i) => {
@@ -9327,7 +9405,7 @@ function aplicarDotacionTeoricaDTO181(btn) {
     const costoPersona = salarios[d.id] || 0;
     totalPersonalActual += dotacion_actual * costoPersona;
     totalPersonalProyecto += dotacion_proyectada * costoPersona;
-    return { cargo: d.nombre, dotacion_actual, costo_actual_anual: dotacion_actual * costoPersona, dotacion_proyectada };
+    return { cargo: filasProy[i].nombre, dotacion_actual, costo_actual_anual: dotacion_actual * costoPersona, dotacion_proyectada };
   }).filter(f => f.dotacion_actual > 0 || f.dotacion_proyectada > 0);
 
   p.costos_om.personal.actual = totalPersonalActual;

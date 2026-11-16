@@ -15,8 +15,11 @@ Variables de entorno (para despliegue):
                        Debe apuntar a un volumen persistente en producción (si no,
                        se pierden los datos en cada redeploy). Por defecto, la misma
                        carpeta del script (sirve para uso local).
-    ADMIN_KEY          Clave de administración (crear/editar/eliminar usuarios).
-                       Sin ella, el registro y la administración quedan cerrados.
+    ADMIN_KEY          Clave de administración inicial (crear/editar/eliminar usuarios).
+                       Desde el panel de Administración se puede definir otra clave,
+                       que queda guardada cifrada en la base de datos; ADMIN_KEY sigue
+                       sirviendo como clave de respaldo por si se olvida la del panel.
+                       Sin ninguna de las dos, el registro y la administración quedan cerrados.
     ANTHROPIC_API_KEY  (opcional) Clave de Claude del servidor. Si está definida,
                        la IA funciona para todos los usuarios con sesión iniciada
                        sin que cada uno ingrese su propia clave (y no se expone
@@ -171,6 +174,11 @@ def inicializar_db():
             fecha_subida TEXT NOT NULL,
             FOREIGN KEY (proyecto_id) REFERENCES proyectos(id)
         );
+
+        CREATE TABLE IF NOT EXISTS configuracion (
+            clave TEXT PRIMARY KEY,
+            valor TEXT NOT NULL
+        );
     ''')
     conn.commit()
     conn.close()
@@ -195,6 +203,34 @@ def hash_password(password, salt=None):
 def verificar_password(password, salt, hash_esperado):
     _, calculado = hash_password(password, salt)
     return secrets.compare_digest(calculado, hash_esperado)
+
+
+def leer_config(clave):
+    conn = get_db()
+    fila = conn.execute('SELECT valor FROM configuracion WHERE clave = ?', (clave,)).fetchone()
+    conn.close()
+    return fila['valor'] if fila else None
+
+
+def clave_admin_guardada():
+    """(salt, hash) de la clave de administración definida desde el panel, o None si no hay."""
+    salt, hash_ = leer_config('admin_salt'), leer_config('admin_hash')
+    return (salt, hash_) if salt and hash_ else None
+
+
+def guardar_clave_admin(nueva):
+    salt, hash_ = hash_password(nueva)
+    conn = get_db()
+    conn.executemany(
+        'INSERT INTO configuracion (clave, valor) VALUES (?, ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor',
+        [('admin_salt', salt), ('admin_hash', hash_), ('admin_clave_fecha', ahora_iso())]
+    )
+    conn.commit()
+    conn.close()
+
+
+def administracion_habilitada():
+    return bool(ADMIN_KEY.strip()) or clave_admin_guardada() is not None
 
 
 def ahora_iso():
@@ -388,22 +424,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Se compara en bytes UTF-8 (compare_digest falla con texto no ASCII: tildes, ñ) e ignorando
         # espacios sobrantes. El frontend envía la clave codificada (encodeURIComponent) en la cabecera,
         # porque las cabeceras HTTP no admiten cualquier carácter; se acepta también sin codificar.
-        esperada = ADMIN_KEY.strip()
-        if not esperada:
-            return False
+        # Vale la clave definida desde el panel (guardada cifrada) o, como respaldo, ADMIN_KEY de Railway.
         recibida = (clave or '').strip()
         candidatos = {recibida}
         try:
-            candidatos.add(urllib.parse.unquote(recibida, errors='strict'))
+            candidatos.add(urllib.parse.unquote(recibida, errors='strict').strip())
         except Exception:
             pass
         try:
             # Una cabecera sin codificar con tildes llega decodificada como latin-1
-            candidatos.add(recibida.encode('latin-1').decode('utf-8'))
+            candidatos.add(recibida.encode('latin-1').decode('utf-8').strip())
         except Exception:
             pass
-        esperada_b = esperada.encode('utf-8')
-        return any(secrets.compare_digest(c.encode('utf-8'), esperada_b) for c in candidatos if c)
+        candidatos = [c for c in candidatos if c]
+        if not candidatos:
+            return False
+        esperada = ADMIN_KEY.strip()
+        if esperada:
+            esperada_b = esperada.encode('utf-8')
+            if any(secrets.compare_digest(c.encode('utf-8'), esperada_b) for c in candidatos):
+                return True
+        guardada = clave_admin_guardada()
+        if guardada:
+            salt, hash_ = guardada
+            if any(verificar_password(c, salt, hash_) for c in candidatos):
+                return True
+        return False
+
+    def _verificar_admin(self, clave, mensaje='Clave de administración incorrecta'):
+        # Igual que el login: tras varios fallos desde la misma IP se bloquea un rato (evita adivinar la clave).
+        clave_intentos = f'admin|{self._ip_cliente()}'
+        espera = _login_bloqueado(clave_intentos)
+        if espera:
+            minutos = max(1, round(espera / 60))
+            self._enviar_json(429, {'error': f'Demasiados intentos fallidos. Espera unos {minutos} minuto(s) antes de volver a intentar.'})
+            return False
+        if not self._admin_autorizado(clave):
+            _registrar_fallo_login(clave_intentos)
+            self._enviar_json(403, {'error': mensaje})
+            return False
+        _limpiar_fallos_login(clave_intentos)
+        return True
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -467,6 +528,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._servir_estatico()
 
     def _rutear_put(self):
+        if self.path == '/api/admin/clave':
+            return self._admin_cambiar_clave()
         m = re.match(r'^/api/admin/usuarios/(\d+)$', self.path)
         if m:
             return self._admin_editar_usuario(int(m.group(1)))
@@ -492,8 +555,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _registro(self):
         body = self._leer_json()
-        if not self._admin_autorizado(self._clave_admin_recibida(body)):
-            return self._enviar_json(403, {'error': 'Clave de acceso al sistema incorrecta'})
+        if not self._verificar_admin(self._clave_admin_recibida(body), 'Clave de acceso al sistema incorrecta'):
+            return
 
         nombre = (body.get('nombre') or '').strip()
         username = (body.get('username') or '').strip().lower()
@@ -560,7 +623,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             'ia_clave_servidor': bool(ANTHROPIC_API_KEY),
             'ia_modelo': CLAUDE_MODEL,
             'ia_max_tokens': CLAUDE_MAX_TOKENS,
-            'registro_habilitado': bool(ADMIN_KEY),
+            'registro_habilitado': administracion_habilitada(),
             'largo_minimo_clave': LARGO_MINIMO_CLAVE,
         })
 
@@ -671,8 +734,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._enviar_json(200, {'ok': True})
 
     def _admin_listar_usuarios(self):
-        if not self._admin_autorizado(self._clave_admin_query_o_header()):
-            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        if not self._verificar_admin(self._clave_admin_query_o_header()):
+            return
         conn = get_db()
         filas = conn.execute('''
             SELECT u.id, u.nombre, u.username, u.institucion, u.fecha_creacion,
@@ -684,8 +747,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _admin_crear_usuario(self):
         body = self._leer_json()
-        if not self._admin_autorizado(self._clave_admin_recibida(body)):
-            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        if not self._verificar_admin(self._clave_admin_recibida(body)):
+            return
         nombre = (body.get('nombre') or '').strip()
         username = (body.get('username') or '').strip().lower()
         password = body.get('password') or ''
@@ -708,8 +771,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _admin_editar_usuario(self, usuario_id):
         body = self._leer_json()
-        if not self._admin_autorizado(self._clave_admin_recibida(body)):
-            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        if not self._verificar_admin(self._clave_admin_recibida(body)):
+            return
         conn = get_db()
         existe = conn.execute('SELECT id FROM usuarios WHERE id = ?', (usuario_id,)).fetchone()
         if not existe:
@@ -740,9 +803,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         conn.close()
         self._enviar_json(200, {'ok': True})
 
+    def _admin_cambiar_clave(self):
+        # La clave actual viaja en X-Admin-Key; la nueva en el body (JSON, admite tildes y ñ sin codificar).
+        body = self._leer_json()
+        if not self._verificar_admin(self.headers.get('X-Admin-Key') or '', 'La clave actual no es correcta'):
+            return
+        nueva = (body.get('nueva_clave') or '').strip()
+        if len(nueva) < LARGO_MINIMO_CLAVE:
+            return self._enviar_json(400, {'error': f'La nueva clave debe tener al menos {LARGO_MINIMO_CLAVE} caracteres'})
+        if len(nueva) > 200:
+            return self._enviar_json(400, {'error': 'La nueva clave es demasiado larga (máximo 200 caracteres)'})
+        guardar_clave_admin(nueva)
+        print('[servidor] Clave de administración cambiada desde el panel')
+        self._enviar_json(200, {'ok': True})
+
     def _admin_eliminar_usuario(self, usuario_id):
-        if not self._admin_autorizado(self._clave_admin_query_o_header()):
-            return self._enviar_json(403, {'error': 'Clave de administración incorrecta'})
+        if not self._verificar_admin(self._clave_admin_query_o_header()):
+            return
         conn = get_db()
         tiene_proyectos = conn.execute('SELECT COUNT(*) c FROM proyectos WHERE usuario_id = ?', (usuario_id,)).fetchone()['c']
         if tiene_proyectos:
@@ -973,7 +1050,7 @@ if __name__ == '__main__':
     print(f'Sistema de Formulación corriendo en el puerto {PORT}')
     print(f'Base de datos y documentos en: {DATA_DIR}')
     print(f'IA: modelo {CLAUDE_MODEL}, máx. {CLAUDE_MAX_TOKENS} tokens, ' + ('clave del servidor' if ANTHROPIC_API_KEY else 'cada usuario usa su propia clave'))
-    if not ADMIN_KEY:
-        print('AVISO: ADMIN_KEY no está definida — el registro y la administración de usuarios quedan cerrados.')
+    if not administracion_habilitada():
+        print('AVISO: ADMIN_KEY no está definida (ni hay clave de administración guardada) — el registro y la administración de usuarios quedan cerrados.')
     print('Deja esta ventana abierta mientras uses el sistema.')
     server.serve_forever()

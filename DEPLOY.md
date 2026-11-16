@@ -60,7 +60,7 @@ Sin esto, cada redeploy borra usuarios y proyectos.
 | Variable | Obligatoria | Para qué |
 |---|---|---|
 | `DATA_DIR` | Sí | Carpeta del Volume (`/data`). |
-| `ADMIN_KEY` | Sí | Clave larga que solo tú conozcas. Permite crear/editar/eliminar usuarios desde el panel de administración. Sin ella, nadie puede registrarse. |
+| `ADMIN_KEY` | Sí | Clave inicial de administración, larga y que solo tú conozcas. Permite entrar al panel de administración (crear/editar/eliminar usuarios). Después puedes definir otra clave desde el mismo panel; `ADMIN_KEY` sigue sirviendo de respaldo si la olvidas. |
 | `ANTHROPIC_API_KEY` | Recomendada | Tu clave de Claude. Con ella, la redacción con IA funciona para todas las cuentas con sesión iniciada, sin que cada cliente ponga su clave; la clave nunca llega al navegador. Sin ella, cada usuario debe ingresar la suya en Configuración. |
 | `CLAUDE_MODEL` | No | Modelo de IA (por defecto `claude-opus-5-5`). Cámbialo aquí cuando salga uno nuevo, sin tocar el código. |
 | `CLAUDE_MAX_TOKENS` | No | Largo máximo de cada respuesta de IA (por defecto 4096 ≈ 3.000 palabras). |
@@ -77,6 +77,8 @@ En "Settings" → "Healthcheck Path" puedes poner `/api/salud`.
 - Claves de usuario con PBKDF2 (100.000 iteraciones), mínimo 8 caracteres.
 - Bloqueo temporal tras 5 intentos fallidos de login (15 minutos, por IP y usuario).
 - La clave de administración viaja en una cabecera (`X-Admin-Key`), no en la URL, y los logs nunca registran parámetros de URL.
+- La clave de administración definida desde el panel se guarda cifrada (PBKDF2) en la base de datos, nunca en texto plano.
+- Bloqueo temporal tras 5 intentos fallidos de clave de administración (15 minutos, por IP).
 - Cerrar sesión invalida el token en el servidor; cambiar la clave de un usuario cierra sus sesiones.
 - Sesiones vencidas se limpian automáticamente.
 - Límite de tamaño por solicitud (archivos de hasta 40 MB).
@@ -84,6 +86,14 @@ En "Settings" → "Healthcheck Path" puedes poner `/api/salud`.
 
 ## 5. Dar acceso a un cliente
 
-Entra al panel de administración (en la pantalla de login) con tu `ADMIN_KEY`
-y crea la cuenta. Si cambias `ADMIN_KEY` en Railway, las cuentas ya creadas
-siguen funcionando.
+Entra al panel de administración (en la pantalla de login) con tu clave de
+administración y crea la cuenta. Si cambias la clave de administración, las
+cuentas ya creadas siguen funcionando.
+
+### Cambiar la clave de administración
+
+En el panel de administración, abajo, usa **"Cambiar clave de administración"**:
+pide la clave actual y la nueva dos veces (mínimo 8 caracteres; admite tildes,
+ñ y espacios). Desde ese momento entras con la nueva. La `ADMIN_KEY` de Railway
+sigue funcionando como respaldo: si olvidas la clave del panel, entra con
+`ADMIN_KEY` y define otra.

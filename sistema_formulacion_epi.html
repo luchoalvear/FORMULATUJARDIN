@@ -381,6 +381,23 @@ body {
 
         <div id="admin-lista-usuarios"></div>
 
+        <div class="border-top mt-3 pt-3">
+          <a href="#" id="btn-admin-mostrar-cambio-clave" class="small"><i class="bi bi-key"></i> Cambiar clave de administración</a>
+          <div id="admin-cambio-clave" class="d-none mt-2">
+            <div class="row g-2">
+              <div class="col-12"><input type="password" class="form-control form-control-sm" id="admin-clave-actual" placeholder="Clave actual" autocomplete="current-password"></div>
+              <div class="col-6"><input type="password" class="form-control form-control-sm" id="admin-clave-nueva" placeholder="Nueva clave (mín. 8 caracteres)" autocomplete="new-password"></div>
+              <div class="col-6"><input type="password" class="form-control form-control-sm" id="admin-clave-nueva2" placeholder="Repite la nueva clave" autocomplete="new-password"></div>
+            </div>
+            <div id="admin-cambio-clave-error" class="alert alert-danger py-2 mt-2 mb-0 small d-none"></div>
+            <div class="form-text">La clave definida en Railway (ADMIN_KEY) sigue funcionando como respaldo, por si olvidas esta.</div>
+            <div class="mt-2 d-flex gap-2">
+              <button class="btn btn-sm btn-primary" id="btn-admin-guardar-clave">Guardar nueva clave</button>
+              <button class="btn btn-sm btn-outline-secondary" id="btn-admin-cancelar-clave">Cancelar</button>
+            </div>
+          </div>
+        </div>
+
         <div class="toggle-modo-login mt-3"><a href="#" id="ir-a-login-desde-panel">Cerrar administración</a></div>
       </div>
     </div>
@@ -2469,6 +2486,7 @@ function mostrarPantallaAdministracion() {
   document.getElementById('admin-login-error').classList.add('d-none');
   document.getElementById('admin-login').classList.remove('d-none');
   document.getElementById('admin-panel').classList.add('d-none');
+  cerrarCambioClaveAdmin();
   const selInst = document.getElementById('admin-usr-institucion');
   selInst.innerHTML = '<option value="">Seleccione...</option>' + INSTITUCIONES.map(i => `<option value="${i}">${i}</option>`).join('');
 }
@@ -2600,6 +2618,44 @@ document.getElementById('btn-admin-crear-usuario').addEventListener('click', asy
     await cargarListaUsuariosAdmin();
   } catch (e) {
     mostrarToast('Error: ' + e.message, 'danger');
+  }
+});
+
+function cerrarCambioClaveAdmin() {
+  ['admin-clave-actual', 'admin-clave-nueva', 'admin-clave-nueva2'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('admin-cambio-clave-error').classList.add('d-none');
+  document.getElementById('admin-cambio-clave').classList.add('d-none');
+}
+
+document.getElementById('btn-admin-mostrar-cambio-clave').addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('admin-cambio-clave').classList.toggle('d-none');
+});
+document.getElementById('btn-admin-cancelar-clave').addEventListener('click', cerrarCambioClaveAdmin);
+
+document.getElementById('btn-admin-guardar-clave').addEventListener('click', async () => {
+  const actual = document.getElementById('admin-clave-actual').value.trim();
+  const nueva = document.getElementById('admin-clave-nueva').value.trim();
+  const nueva2 = document.getElementById('admin-clave-nueva2').value.trim();
+  const errEl = document.getElementById('admin-cambio-clave-error');
+  const mostrarError = (msg) => { errEl.textContent = msg; errEl.classList.remove('d-none'); };
+  errEl.classList.add('d-none');
+  if (!actual) return mostrarError('Ingresa la clave actual.');
+  if (nueva.length < 8) return mostrarError('La nueva clave debe tener al menos 8 caracteres.');
+  if (nueva !== nueva2) return mostrarError('Las dos claves nuevas no coinciden.');
+  try {
+    const resp = await fetch(API_BASE + '/admin/clave', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': encodeURIComponent(actual) },
+      body: JSON.stringify({ nueva_clave: nueva })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return mostrarError(data.error || ('Error ' + resp.status));
+    ADMIN_KEY_ACTUAL = nueva;  // el panel sigue abierto con la clave nueva
+    cerrarCambioClaveAdmin();
+    mostrarToast('Clave de administración cambiada. Desde ahora usa la nueva para entrar.', 'success');
+  } catch (e) {
+    mostrarError('No se pudo conectar con el servidor: ' + e.message);
   }
 });
 
